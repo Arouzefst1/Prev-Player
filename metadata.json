@@ -1,0 +1,5 @@
+{
+  "name": "VpTube",
+  "description": "A high-performance, aesthetic React video player with advanced keyboard controls, smooth scrubbing, and intuitive UI behavior.",
+  "requestFramePermissions": []
+}
