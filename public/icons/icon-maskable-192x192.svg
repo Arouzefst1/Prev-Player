@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <defs>
+    <mask id="roundMask">
+      <rect fill="white" width="192" height="192" rx="45"/>
+    </mask>
+  </defs>
+  <rect fill="#1a1a1a" width="192" height="192" mask="url(#roundMask)"/>
+  <path fill="#ef4444" d="M48 48h96v96H48z" stroke="#1a1a1a" stroke-width="2" mask="url(#roundMask)"/>
+  <polygon fill="#ffffff" points="80,70 80,122 130,96" mask="url(#roundMask)"/>
+</svg>

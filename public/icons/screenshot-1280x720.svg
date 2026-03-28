@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <rect fill="#000" width="1280" height="720"/>
+  <rect fill="#1a1a1a" y="600" width="1280" height="120"/>
+  <rect fill="#262626" x="20" y="610" width="1240" height="2"/>
+  <path fill="#ef4444" d="M300 150h680v300H300z" stroke="#ffffff" stroke-width="2"/>
+  <polygon fill="#ffffff" points="380,230 380,370 600,300"/>
+  <circle cx="640" cy="300" r="12" fill="#ef4444" opacity="0.2"/>
+  <circle cx="50" cy="630" r="20" fill="#404040"/>
+  <circle cx="1230" cy="630" r="20" fill="#404040"/>
+  <text x="640" y="680" font-size="24" fill="#999" text-anchor="middle" font-family="Arial">Zenith Player - Desktop</text>
+</svg>

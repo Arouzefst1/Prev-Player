@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Upload, FileVideo, AlertCircle, List, X, Trash2, Save, FolderOpen, History } from 'lucide-react';
+import { Upload, FileVideo, AlertCircle, List, X, Trash2, Save, FolderOpen, History, Play, ChevronsRight } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import { srtToVtt } from './utils';
 
@@ -19,6 +19,9 @@ interface HistoryItem {
   addedAt: number;
 }
 
+const STORAGE_KEY = 'prevplayer_last_video';
+const STORAGE_RECENT = 'prevplayer_recent_videos';
+
 function App() {
   const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
@@ -26,6 +29,47 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [recentVideos, setRecentVideos] = useState<HistoryItem[]>([]);
+  const [savedVideoUrl, setSavedVideoUrl] = useState<string | null>(null);
+
+  // Load saved video and recent videos from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const videoData = JSON.parse(saved);
+        setSavedVideoUrl(videoData.src);
+      } catch (e) {
+        console.log('Failed to load saved video');
+      }
+    }
+    
+    const savedRecent = localStorage.getItem(STORAGE_RECENT);
+    if (savedRecent) {
+      try {
+        const recent: HistoryItem[] = JSON.parse(savedRecent);
+        setRecentVideos(recent);
+      } catch (e) {
+        console.log('Failed to load recent videos');
+      }
+    }
+  }, []);
+
+  // Save current video to localStorage when it changes
+  useEffect(() => {
+    if (playlist.length > 0 && playlist[currentIndex]) {
+      const videoData = {
+        src: playlist[currentIndex].src,
+        name: playlist[currentIndex].name,
+        subtitleSrc: playlist[currentIndex].subtitleSrc
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(videoData));
+    }
+  }, [playlist, currentIndex]);
+
+  // Save recent videos to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem(STORAGE_RECENT, JSON.stringify(recentVideos));
+  }, [recentVideos]);
 
   // Add video to history (max 5)
   const addToHistory = useCallback((video: PlaylistItem) => {
@@ -358,6 +402,78 @@ function App() {
             <p className="text-neutral-400 mb-6 sm:mb-8 text-sm sm:text-base md:text-lg">
               Drag and drop video files here, or browse to start your playlist.
             </p>
+
+            {/* YouTube-Style Resume Card */}
+            {savedVideoUrl && (
+              <div className="mb-8 w-full max-w-sm mx-auto group cursor-pointer">
+                <button
+                  onClick={() => {
+                    const saved = localStorage.getItem(STORAGE_KEY);
+                    if (saved) {
+                      try {
+                        const videoData = JSON.parse(saved);
+                        const resumeVideo: PlaylistItem = {
+                          id: 'resumed_' + Math.random().toString(36).substr(2, 9),
+                          src: videoData.src,
+                          name: videoData.name,
+                          subtitleSrc: videoData.subtitleSrc
+                        };
+                        setPlaylist([resumeVideo]);
+                        setCurrentIndex(0);
+                      } catch (e) {
+                        console.log('Failed to resume video');
+                      }
+                    }
+                  }}
+                  className="w-full"
+                >
+                  {/* Card Container */}
+                  <div className="relative overflow-hidden rounded-xl shadow-2xl transform transition-all duration-300 ease-out group-hover:scale-105 group-hover:shadow-3xl group-hover:shadow-purple-500/20 bg-neutral-800">
+                    {/* Thumbnail Background */}
+                    <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
+                      {/* Ambient Glow Effect on Hover */}
+                      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                        <div className="absolute -top-1/2 -left-1/2 w-full h-full bg-gradient-to-br from-purple-500/30 to-transparent blur-3xl animate-pulse"></div>
+                        <div className="absolute -bottom-1/2 -right-1/2 w-full h-full bg-gradient-to-tl from-red-500/20 to-transparent blur-3xl animate-pulse" style={{animationDelay: '0.5s'}}></div>
+                      </div>
+                      
+                      {/* Play Icon Overlay */}
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition-all duration-300">
+                        <div className="bg-red-600 p-3 sm:p-4 rounded-full transform transition-all duration-300 group-hover:scale-110 group-hover:shadow-lg group-hover:shadow-red-600/50">
+                          <Play size={24} className="sm:w-8 sm:h-8 fill-white text-white" />
+                        </div>
+                      </div>
+
+                      {/* Video Title Overlay - Bottom */}
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2 sm:p-3 transform transition-all duration-300 group-hover:from-black/90">
+                        <p className="text-white font-semibold text-xs sm:text-sm line-clamp-2 group-hover:line-clamp-3">
+                          {savedVideoUrl ? (() => {
+                            const saved = localStorage.getItem(STORAGE_KEY);
+                            return saved ? JSON.parse(saved).name : 'Last Video';
+                          })() : 'Last Video'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Info Section */}
+                    <div className="p-2 sm:p-3 bg-neutral-800 transform transition-all duration-300 group-hover:bg-neutral-700">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-red-500 flex items-center justify-center flex-shrink-0">
+                          <History size={14} className="text-white" />
+                        </div>
+                        <div className="flex-1 text-left">
+                          <p className="text-xs font-semibold text-neutral-300 group-hover:text-white transition-colors">Resume</p>
+                          <p className="text-xs text-neutral-500 group-hover:text-neutral-400 transition-colors">Continue watching</p>
+                        </div>
+                        <div className="text-right transform transition-all duration-300 group-hover:translate-x-1">
+                          <ChevronsRight size={16} className="text-purple-400 group-hover:text-purple-300" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            )}
 
             <label className="group relative inline-flex items-center justify-center px-6 sm:px-8 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-white transition-all duration-200 bg-red-600 rounded-full hover:bg-red-700 hover:shadow-lg hover:shadow-red-500/30 cursor-pointer overflow-hidden active:scale-95">
               <span className="mr-2"><Upload size={18} className="sm:w-5 sm:h-5" /></span>

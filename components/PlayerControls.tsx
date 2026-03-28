@@ -22,6 +22,8 @@ interface PlayerControlsProps {
   onSpeedChange: (speed: number) => void;
   onToggleSubtitles: () => void;
   isFullscreen: boolean;
+  isRemainingTimeMode: boolean;
+  onToggleTimeDisplay: () => void;
 }
 
 const PlayerControls: React.FC<PlayerControlsProps> = ({
@@ -43,13 +45,31 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   onToggleFullscreen,
   onSpeedChange,
   onToggleSubtitles,
-  isFullscreen
+  isFullscreen,
+  isRemainingTimeMode,
+  onToggleTimeDisplay
 }) => {
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
   const progressPercent = duration ? (currentTime / duration) * 100 : 0;
 
   const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+  const formatTime = (seconds: number): string => {
+    if (!seconds || !isFinite(seconds)) return '0:00';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const getRemainingTime = (): number => {
+    return Math.max(0, duration - currentTime);
+  };
 
   // Close settings when clicking outside
   useEffect(() => {
@@ -70,12 +90,12 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
 
   return (
     <div
-      className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-4 pb-4 pt-14 transition-opacity duration-300 ease-in-out z-20 ${
+      className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-2 sm:px-4 pb-2 sm:pb-4 pt-8 sm:pt-14 transition-opacity duration-300 ease-in-out z-20 ${
         visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
       }`}
     >
       {/* Progress Bar Container */}
-      <div className="relative group w-full h-4 mb-2 cursor-pointer flex items-center">
+      <div className="relative group w-full h-2 sm:h-4 mb-1.5 sm:mb-2 cursor-pointer flex items-center">
         {/* Track Background */}
         <div className="absolute w-full h-1 bg-white/30 rounded-full overflow-hidden">
              {/* Buffered/Progress Bar */}
@@ -84,7 +104,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
                 style={{ width: `${progressPercent}%` }}
             >
                 {/* Glow effect at the tip */}
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-2 h-2 bg-red-600 rounded-full shadow-[0_0_10px_rgba(220,38,38,0.8)] opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1.5 sm:w-2 h-1.5 sm:h-2 bg-red-600 rounded-full shadow-[0_0_10px_rgba(220,38,38,0.8)] opacity-0 group-hover:opacity-100 transition-opacity"></div>
             </div>
         </div>
         
@@ -104,33 +124,29 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
         
         {/* Thumb (Only visible on hover or drag) */}
         <div 
-            className="pointer-events-none absolute h-3 w-3 bg-red-600 rounded-full shadow-md top-1/2 -translate-y-1/2 -ml-1.5 transition-all duration-100 scale-0 group-hover:scale-100"
+            className="pointer-events-none absolute h-2 sm:h-3 w-2 sm:w-3 bg-red-600 rounded-full shadow-md top-1/2 -translate-y-1/2 -ml-1 sm:-ml-1.5 transition-all duration-100 scale-0 group-hover:scale-100"
             style={{ left: `${progressPercent}%` }}
         />
       </div>
 
-      {/* Buttons Row */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      {/* Buttons Row - Responsive Layout */}
+      <div className="flex items-center justify-between flex-wrap gap-1.5 sm:gap-4">
+        {/* Left Controls */}
+        <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
           <button
             onClick={onPlayPause}
-            className="text-white hover:text-gray-200 transition-colors p-1"
+            className="text-white hover:text-gray-200 transition-colors p-1 sm:p-1.5 active:scale-95"
             title={isPlaying ? "Pause (k)" : "Play (k)"}
           >
-            {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
+            {isPlaying ? <Pause size={24} className="sm:w-7 sm:h-7" fill="currentColor" /> : <Play size={24} className="sm:w-7 sm:h-7" fill="currentColor" />}
           </button>
 
-          <button onClick={() => {
-              // Quick skip next logic could go here
-          }} className="text-white/70 hover:text-white transition-colors">
-            {/* Next icon if needed */}
-          </button>
-
-          <div className="flex items-center gap-2 group/vol relative">
-            <button onClick={onToggleMute} className="text-white hover:text-gray-200 transition-colors">
-              {isMuted || volume === 0 ? <VolumeX size={24} /> : <Volume2 size={24} />}
+          {/* Volume Controls */}
+          <div className="flex items-center gap-1 sm:gap-2 group/vol relative">
+            <button onClick={onToggleMute} className="text-white hover:text-gray-200 transition-colors p-1 active:scale-95">
+              {isMuted || volume === 0 ? <VolumeX size={20} className="sm:w-6 sm:h-6" /> : <Volume2 size={20} className="sm:w-6 sm:h-6" />}
             </button>
-            <div className="w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300 ease-out flex items-center">
+            <div className="hidden sm:flex w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300 ease-out items-center">
               <input
                 type="range"
                 min="0"
@@ -143,21 +159,36 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </div>
           </div>
 
-          <span className="text-white text-sm font-medium select-none ml-2">
-            {formatTime(currentTime)} / {formatTime(duration)}
-          </span>
+          {/* Time Display - Next to Volume */}
+          <button 
+            onClick={onToggleTimeDisplay}
+            className="text-white hover:text-gray-200 transition-colors p-1 sm:p-1.5 active:scale-95 text-xs sm:text-sm font-medium whitespace-nowrap"
+            title="Click to toggle remaining time"
+          >
+            {isRemainingTimeMode ? (
+              <span className="flex items-center gap-1">
+                <span className="text-red-400">-</span>
+                {formatTime(getRemainingTime())}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1">
+                {formatTime(currentTime)} <span className="text-neutral-400">/</span> {formatTime(duration)}
+              </span>
+            )}
+          </button>
         </div>
 
-        <div className="flex items-center gap-4 relative">
+        {/* Right Controls - Collapsible on Mobile */}
+        <div className="flex items-center gap-1.5 sm:gap-4 relative">
           
-          {/* Caption Toggle */}
+          {/* Caption Toggle - Always visible if subtitles exist */}
           {hasSubtitles && (
             <button 
                 onClick={onToggleSubtitles}
-                className={`transition-colors ${subtitlesEnabled ? 'text-white border-b-2 border-red-600' : 'text-white/70 hover:text-white'}`}
+                className={`transition-colors p-1 active:scale-95 ${subtitlesEnabled ? 'text-white border-b-2 border-red-600' : 'text-white/70 hover:text-white'}`}
                 title="Subtitles/CC (c)"
             >
-                <Captions size={24} />
+                <Captions size={18} className="sm:w-6 sm:h-6" />
             </button>
           )}
 
@@ -165,17 +196,17 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
           <div className="relative" ref={settingsRef}>
             <button
                 onClick={() => setShowSettings(!showSettings)}
-                className={`transition-colors ${showSettings ? 'text-white rotate-45' : 'text-white/70 hover:text-white'}`}
+                className={`transition-colors p-1 active:scale-95 ${showSettings ? 'text-white rotate-45' : 'text-white/70 hover:text-white'}`}
                 title="Settings"
             >
-                <Settings size={24} className="transition-transform duration-300" />
+                <Settings size={18} className="sm:w-6 sm:h-6 transition-transform duration-300" />
             </button>
             
             {showSettings && (
-                <div className="absolute bottom-12 right-0 bg-black/90 backdrop-blur-md rounded-xl p-2 w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-sm z-50">
-                    <div className="p-2 border-b border-white/10 mb-2 font-bold text-gray-400">Settings</div>
-                    <div className="mb-2">
-                        <div className="px-2 py-1 text-xs text-gray-400 font-semibold uppercase tracking-wider">Playback Speed</div>
+                <div className="absolute bottom-12 right-0 bg-black/90 backdrop-blur-md rounded-xl p-1.5 sm:p-2 w-40 sm:w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-xs sm:text-sm z-50">
+                    <div className="p-1.5 sm:p-2 border-b border-white/10 mb-1.5 sm:mb-2 font-bold text-gray-400 text-xs">Settings</div>
+                    <div className="mb-1.5 sm:mb-2">
+                        <div className="px-2 py-0.5 text-xs text-gray-400 font-semibold uppercase tracking-wider">Speed</div>
                         <div className="max-h-32 overflow-y-auto custom-scrollbar">
                             {speeds.map(s => (
                                 <button
@@ -184,7 +215,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
                                         onSpeedChange(s);
                                         setShowSettings(false);
                                     }}
-                                    className={`w-full text-left px-3 py-2 hover:bg-white/10 rounded flex justify-between ${playbackSpeed === s ? 'text-red-500 font-bold' : 'text-white'}`}
+                                    className={`w-full text-left px-2 sm:px-3 py-1.5 sm:py-2 hover:bg-white/10 rounded flex justify-between text-xs sm:text-sm active:scale-95 ${playbackSpeed === s ? 'text-red-500 font-bold' : 'text-white'}`}
                                 >
                                     <span>{s === 1 ? 'Normal' : s + 'x'}</span>
                                     {playbackSpeed === s && <span>✓</span>}
@@ -198,10 +229,10 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
 
           <button
             onClick={onToggleFullscreen}
-            className="text-white/70 hover:text-white transition-colors"
+            className="text-white/70 hover:text-white transition-colors p-1 active:scale-95"
             title="Fullscreen (f)"
           >
-            {isFullscreen ? <Minimize size={24} /> : <Maximize size={24} />}
+            {isFullscreen ? <Minimize size={18} className="sm:w-6 sm:h-6" /> : <Maximize size={18} className="sm:w-6 sm:h-6" />}
           </button>
         </div>
       </div>

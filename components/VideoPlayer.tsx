@@ -21,6 +21,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
   const spaceHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSpaceHeldRef = useRef<boolean>(false);
   const savedSpeedRef = useRef<number>(1);
+  const touchStartRef = useRef<number>(0);
+  const holdTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTouchHoldRef = useRef<boolean>(false);
 
   // Player State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -37,6 +40,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
   const [showControls, setShowControls] = useState(true);
   const [overlayState, setOverlayState] = useState<OverlayState>({ action: null, id: 0 });
   const [showSpeedOverlay, setShowSpeedOverlay] = useState(false);
+  const [showTimeToggle, setShowTimeToggle] = useState(false);
+  const [isRemainingTimeMode, setIsRemainingTimeMode] = useState(false);
 
   // --- Effect: Subtitles ---
   useEffect(() => {
@@ -63,8 +68,30 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
   }, [subtitlesSrc, subtitlesEnabled]);
 
   // --- Helpers ---
+  const formatTime = (seconds: number): string => {
+    if (!seconds || !isFinite(seconds)) return '0:00';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const getRemainingTime = (): number => {
+    return Math.max(0, duration - currentTime);
+  };
+
   const triggerOverlay = (action: OverlayState['action'], value?: string | number) => {
     setOverlayState({ action, value, id: Date.now() });
+  };
+
+  const toggleTimeDisplay = () => {
+    setIsRemainingTimeMode(!isRemainingTimeMode);
+    setShowTimeToggle(true);
+    setTimeout(() => setShowTimeToggle(false), 2000);
   };
 
   const resetControlsTimer = useCallback(() => {
@@ -167,6 +194,41 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
       lastTapRef.current = now;
     }
   }, [toggleFullscreen]);
+
+  // Mobile touch hold for 2x speed
+  const handleTouchStart = useCallback(() => {
+    touchStartRef.current = Date.now();
+    isTouchHoldRef.current = false;
+
+    // Start hold detection timer - 500ms hold activates 2x speed
+    holdTimeoutRef.current = setTimeout(() => {
+      isTouchHoldRef.current = true;
+      savedSpeedRef.current = videoRef.current?.playbackRate || 1;
+      if (videoRef.current) {
+        videoRef.current.playbackRate = 2;
+        setPlaybackSpeed(2);
+      }
+      setShowSpeedOverlay(true);
+    }, 500);
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    // Clear hold timeout
+    if (holdTimeoutRef.current) {
+      clearTimeout(holdTimeoutRef.current);
+      holdTimeoutRef.current = null;
+    }
+
+    // If was holding for 2x, restore speed
+    if (isTouchHoldRef.current) {
+      isTouchHoldRef.current = false;
+      if (videoRef.current) {
+        videoRef.current.playbackRate = savedSpeedRef.current;
+        setPlaybackSpeed(savedSpeedRef.current);
+      }
+      setShowSpeedOverlay(false);
+    }
+  }, []);
 
   // Handle file selection for changing video
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -416,8 +478,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
             }
           }, 300);
         }}
-        onTouchEnd={(e) => {
-          handleDoubleTap(e);
+        onTouchStart={() => {
+          handleTouchStart();
+        }}
+        onTouchEnd={() => {
+          handleTouchEnd();
+        }}
+        onTouchCancel={() => {
+          handleTouchEnd();
         }}
       />
 
@@ -433,9 +501,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
 
       {/* 2x Speed Overlay Animation - only shows when holding spacebar */}
       {showSpeedOverlay && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
-          <div className="bg-black/70 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg">
-            <span className="text-white font-bold text-lg">2x</span>
+        <div className="absolute top-2 sm:top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className="bg-black/70 backdrop-blur-sm px-3 sm:px-4 py-1.5 sm:py-2 rounded-full shadow-lg">
+            <span className="text-white font-bold text-sm sm:text-lg">2x</span>
           </div>
         </div>
       )}
@@ -444,10 +512,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
       {onChangeVideo && (
         <button
           onClick={openFilePicker}
-          className={`absolute left-4 top-4 z-30 bg-black/60 hover:bg-black/80 text-white p-2 rounded-full backdrop-blur-md transition-all duration-300 hover:scale-110 group ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          className={`absolute left-2 sm:left-4 top-2 sm:top-4 z-30 bg-black/60 hover:bg-black/80 text-white p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-300 hover:scale-110 group active:scale-95 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
           title="Change Video"
         >
-          <FolderOpen size={20} className="group-hover:text-red-400 transition-colors" />
+          <FolderOpen size={18} className="sm:w-5 sm:h-5 group-hover:text-red-400 transition-colors" />
         </button>
       )}
 
@@ -481,6 +549,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, subtitlesSrc, autoPlay =
         onSpeedChange={changeSpeed}
         onToggleSubtitles={() => setSubtitlesEnabled(!subtitlesEnabled)}
         isFullscreen={isFullscreen}
+        isRemainingTimeMode={isRemainingTimeMode}
+        onToggleTimeDisplay={toggleTimeDisplay}
       />
     </div>
   );
