@@ -4,6 +4,18 @@ import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
 import { srtToVtt, extractVideoThumbnail, getVideoDuration, videoStore, VideoMeta, videoOrderStore } from './utils';
 
+// Supported video extensions for folder scanning
+const VIDEO_EXTENSIONS = new Set([
+  '.mp4', '.webm', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ogv', '.ogg',
+  '.m4v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts', '.vob', '.mpg', '.mpeg',
+]);
+
+function isVideoFile(file: File): boolean {
+  if (file.type.startsWith('video/')) return true;
+  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+  return VIDEO_EXTENSIONS.has(ext);
+}
+
 interface PlaylistItem {
   id: string;
   src: string;       // blob URL for playback
@@ -30,6 +42,7 @@ function App() {
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const videoPlayerRef = useRef<{ isPlaying: boolean }>(null);
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
 
   // Load library from IndexedDB on mount
   useEffect(() => {
@@ -178,10 +191,10 @@ function App() {
 
   // Handle file selection - add to library AND auto-play the first selected video
   const handleFileSelect = async (files: FileList | File[]) => {
-    const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
+    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
     
     if (videoFiles.length === 0) {
-      setError("Please select video files.");
+      setError("No playable video files found.");
       return;
     }
 
@@ -218,6 +231,83 @@ function App() {
 
     setIsLoading(false);
   };
+
+  // Handle adding files to library only (no auto-play), used from library panel
+  const handleAddToLibraryOnly = async (files: FileList | File[]) => {
+    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
+    if (videoFiles.length === 0) {
+      setError("No playable video files found.");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    for (const file of videoFiles) {
+      await addToLibrary(file);
+    }
+
+    setIsLoading(false);
+  };
+
+  // Handle importing a whole folder from PC:
+  // 1. Scans for video files  2. Adds them to library  3. Creates a folder entry with the real folder name
+  const handleAddFolderFromPC = useCallback(async (files: FileList | File[]) => {
+    const allFiles = Array.from(files);
+    const videoFiles = allFiles.filter(f => isVideoFile(f));
+    if (videoFiles.length === 0) {
+      setError('No playable video files found in this folder.');
+      return;
+    }
+
+    // Extract the top-level folder name from webkitRelativePath (e.g. "MyVideos/clip.mp4" → "MyVideos")
+    let folderName = 'Imported Folder';
+    const firstPath = (allFiles[0] as any).webkitRelativePath as string | undefined;
+    if (firstPath) {
+      const parts = firstPath.split('/');
+      if (parts.length >= 2) folderName = parts[0];
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    // Add all videos to library and collect their IDs
+    const addedIds: string[] = [];
+    for (const file of videoFiles) {
+      const meta = await addToLibrary(file);
+      addedIds.push(meta.id);
+    }
+
+    // Create a folder with the real name and link the videos
+    const { folderStore } = await import('./utils');
+    const folderId = Math.random().toString(36).substr(2, 9);
+    folderStore.save({ id: folderId, name: folderName, videoIds: addedIds, createdAt: Date.now() });
+
+    // Force a state refresh so VideoLibrary's folder-reload effect fires after the folder is saved
+    setVideoLibrary(prev => [...prev]);
+
+    setIsLoading(false);
+  }, [addToLibrary]);
+
+  // Pause video when library opens
+  const openLibrary = useCallback(() => {
+    // Capture the play state before pausing
+    const videoEl = videoElRef.current;
+    if (videoEl && !videoEl.paused) {
+      setWasPlayingBeforeLibrary(true);
+      videoEl.pause();
+    }
+    setShowLibrary(true);
+  }, []);
+
+  const closeLibrary = useCallback(() => {
+    setShowLibrary(false);
+    // Resume if was playing before
+    const videoEl = videoElRef.current;
+    if (videoEl && wasPlayingBeforeLibrary) {
+      videoEl.play().catch(() => {});
+    }
+  }, [wasPlayingBeforeLibrary]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -334,7 +424,7 @@ function App() {
 
   // Add videos from PC to a specific folder (import to library + add to folder, no auto-play)
   const handleAddToFolder = useCallback(async (files: FileList | File[], folderId: string) => {
-    const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
+    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
     if (videoFiles.length === 0) return;
 
     setIsLoading(true);
@@ -346,6 +436,11 @@ function App() {
     }
     setIsLoading(false);
   }, [addToLibrary]);
+
+  // Store reference to video element for pause/resume
+  const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoElRef.current = el;
+  }, []);
 
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
@@ -370,7 +465,7 @@ function App() {
               subtitlesSrc={playlist[currentIndex].subtitleSrc}
               autoPlay={wasPlayingBeforeLibrary}
               onEnded={playNext}
-              onChangeVideo={() => setShowLibrary(true)}
+              onChangeVideo={() => openLibrary()}
               onFileSelect={(files) => handleFileSelect(files)}
               onPlayStateChange={(playing) => setWasPlayingBeforeLibrary(playing)}
               onNext={playNext}
@@ -382,9 +477,10 @@ function App() {
               onJumpTo={jumpTo}
               onReorderPlaylist={handleReorderPlaylist}
               startFullscreen={isFullscreenRef.current}
-              onOpenLibrary={() => setShowLibrary(!showLibrary)}
+              onOpenLibrary={() => { showLibrary ? closeLibrary() : openLibrary(); }}
               showLibraryButton={!showLibrary}
               fullscreenContainerRef={playerWrapperRef}
+              onVideoRef={handleVideoRef}
             />
           </div>
 
@@ -394,11 +490,12 @@ function App() {
               videos={videoLibrary}
               onPlayVideo={playFromLibrary}
               onDeleteVideo={deleteFromLibrary}
-              onClose={() => setShowLibrary(false)}
-              onAddVideos={handleFileSelect}
+              onClose={closeLibrary}
+              onAddVideos={handleAddToLibraryOnly}
               onReorderVideos={handleReorderVideos}
               onPlayFolder={playFolder}
               onAddToFolder={handleAddToFolder}
+              onAddFolderFromPC={handleAddFolderFromPC}
             />
           )}
         </div>
@@ -488,7 +585,7 @@ function App() {
               {/* View Library */}
               {videoLibrary.length > 0 && (
                 <button
-                  onClick={() => setShowLibrary(true)}
+                  onClick={openLibrary}
                   className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-all active:scale-95"
                 >
                   <Library size={20} className="sm:w-6 sm:h-6" />
@@ -528,11 +625,12 @@ function App() {
           videos={videoLibrary}
           onPlayVideo={playFromLibrary}
           onDeleteVideo={deleteFromLibrary}
-          onClose={() => setShowLibrary(false)}
-          onAddVideos={handleFileSelect}
+          onClose={closeLibrary}
+          onAddVideos={handleAddToLibraryOnly}
           onReorderVideos={handleReorderVideos}
           onPlayFolder={playFolder}
           onAddToFolder={handleAddToFolder}
+          onAddFolderFromPC={handleAddFolderFromPC}
         />
       )}
     </div>

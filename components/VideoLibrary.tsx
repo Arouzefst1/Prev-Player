@@ -15,6 +15,7 @@ interface VideoLibraryProps {
   onReorderVideos?: (orderedIds: string[]) => void;
   onPlayFolder?: (videoIds: string[], shuffle: boolean, loop: boolean) => void;
   onAddToFolder?: (files: FileList | File[], folderId: string) => void;
+  onAddFolderFromPC?: (files: FileList | File[]) => void;
 }
 
 // ============================================================
@@ -189,16 +190,22 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   onReorderVideos,
   onPlayFolder,
   onAddToFolder,
+  onAddFolderFromPC,
 }) => {
   // Tabs
   const [activeTab, setActiveTab] = useState<'videos' | 'folders'>('videos');
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const addFileInputRef = useRef<HTMLInputElement>(null);
+  const addFolderInputRef = useRef<HTMLInputElement>(null);
   const folderAddFileInputRef = useRef<HTMLInputElement>(null);
 
   // Videos tab — ordered list
   const [orderedVideos, setOrderedVideos] = useState<VideoMeta[]>([]);
+
+  // Edit mode (multi-select delete) — Videos tab only
+  const [editMode, setEditMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Folders tab
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -324,6 +331,37 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const handlePlayFolder = () => {
     if (!openFolder || openFolder.videoIds.length === 0) return;
     onPlayFolder?.(openFolder.videoIds, folderShuffle, folderLoop);
+  };
+
+  // Edit mode helpers (Videos tab only)
+  const toggleEditMode = () => {
+    if (editMode) {
+      setSelectedIds(new Set());
+    }
+    setEditMode(!editMode);
+  };
+
+  const toggleSelectVideo = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    if (selectedIds.size === filteredVideos.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredVideos.map(v => v.id)));
+    }
+  };
+
+  const deleteSelected = () => {
+    selectedIds.forEach(id => onDeleteVideo(id));
+    setSelectedIds(new Set());
+    setEditMode(false);
   };
 
   // ============================================================
@@ -604,29 +642,60 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
             <h1 className="text-2xl sm:text-3xl font-bold text-white">Video Library</h1>
             <p className="text-neutral-400 text-sm mt-1">{videos.length} videos · {folders.length} folders</p>
           </div>
-          {/* Add Videos Button */}
+          {/* Add Videos Buttons */}
           {onAddVideos && (
             <>
+              {/* Hidden file input */}
               <input
                 ref={addFileInputRef}
                 type="file"
                 multiple
-                accept="video/*"
+                accept="video/*,.mkv,.avi,.mov,.wmv,.flv,.ogv,.m4v,.3gp,.ts,.mts,.m2ts,.vob,.mpg,.mpeg"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files) onAddVideos(e.target.files);
                   e.target.value = '';
                 }}
               />
+              {/* Hidden folder input */}
+              <input
+                ref={addFolderInputRef}
+                type="file"
+                // @ts-ignore webkitdirectory is non-standard
+                webkitdirectory=""
+                directory=""
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files && onAddFolderFromPC) {
+                    onAddFolderFromPC(e.target.files);
+                  }
+                  e.target.value = '';
+                }}
+              />
+              {/* Add Files button */}
               <button
                 onClick={() => addFileInputRef.current?.click()}
                 className="group relative p-2 rounded-lg bg-red-600 hover:bg-red-700 transition-all duration-300 hover:scale-105 active:scale-95 hover:shadow-lg hover:shadow-red-600/30"
-                title="Add Videos"
+                title="Add Video Files"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                   className="text-white sm:w-6 sm:h-6 transition-transform duration-300 group-hover:rotate-90"
                 >
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+              {/* Add Folder button */}
+              <button
+                onClick={() => addFolderInputRef.current?.click()}
+                className="group relative p-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 hover:scale-105 active:scale-95"
+                title="Add Folder (scans for videos)"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                  className="text-neutral-300 sm:w-6 sm:h-6 group-hover:text-white transition-colors"
+                >
+                  <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                  <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
                 </svg>
               </button>
             </>
@@ -642,7 +711,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
         {(['videos', 'folders'] as const).map(tab => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => { setActiveTab(tab); setEditMode(false); setSelectedIds(new Set()); }}
             className={`relative flex-1 sm:flex-none px-6 py-3 text-sm font-semibold transition-colors duration-200 ${
               activeTab === tab ? 'text-white' : 'text-neutral-500 hover:text-neutral-300'
             }`}
@@ -685,7 +754,68 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                 <List size={18} />
               </button>
             </div>
+            {/* Edit mode toggle (pencil SVG) */}
+            <button
+              onClick={toggleEditMode}
+              className={`p-2 rounded-lg transition-all duration-200 active:scale-90 ${editMode ? 'bg-red-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700'}`}
+              title={editMode ? 'Exit Edit Mode' : 'Edit Mode'}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
           </div>
+
+          {/* Edit mode action bar */}
+          {editMode && (
+            <div className="flex items-center gap-3 px-4 sm:px-6 py-2.5 border-b border-neutral-800 bg-neutral-900/80 animate-[fadeIn_0.2s_ease]">
+              {/* Select All checkbox */}
+              <button
+                onClick={selectAll}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-all active:scale-90"
+                title={selectedIds.size === filteredVideos.length ? 'Deselect All' : 'Select All'}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  {selectedIds.size === filteredVideos.length && filteredVideos.length > 0 ? (
+                    <>
+                      <rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" className="text-red-500" stroke="none" />
+                      <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" />
+                    </>
+                  ) : (
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                  )}
+                </svg>
+              </button>
+              <span className="text-sm text-neutral-400">
+                {selectedIds.size > 0 ? `${selectedIds.size} selected` : 'Select videos to delete'}
+              </span>
+              <div className="flex-1" />
+              {/* Delete selected */}
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={deleteSelected}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white transition-all duration-200 active:scale-95"
+                  title={`Delete ${selectedIds.size} video${selectedIds.size > 1 ? 's' : ''}`}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                    <line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" />
+                  </svg>
+                  <span className="text-sm font-semibold">{selectedIds.size}</span>
+                </button>
+              )}
+              {/* Cancel edit */}
+              <button
+                onClick={toggleEditMode}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-all active:scale-90"
+                title="Cancel"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          )}
 
           {/* Videos content */}
           <div className="flex-1 overflow-auto custom-scrollbar">
@@ -695,11 +825,55 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               </div>
             ) : viewMode === 'grid' ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4 p-4 sm:p-6">
-                {filteredVideos.map(renderVideoCard)}
+                {filteredVideos.map(video => (
+                  <div key={video.id} className="relative">
+                    {editMode && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleSelectVideo(video.id); }}
+                        className="absolute top-2 left-2 z-10 p-0.5 rounded"
+                      >
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          {selectedIds.has(video.id) ? (
+                            <>
+                              <rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" className="text-red-500" stroke="none" />
+                              <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" />
+                            </>
+                          ) : (
+                            <rect x="3" y="3" width="18" height="18" rx="2" className="text-white/70" />
+                          )}
+                        </svg>
+                      </button>
+                    )}
+                    {renderVideoCard(video)}
+                  </div>
+                ))}
               </div>
             ) : (
               <div>
-                {filteredVideos.map((video, i) => renderVideoItem(video, i, videoDrag, { showDelete: true }))}
+                {filteredVideos.map((video, i) => (
+                  <div key={video.id} className="flex items-center">
+                    {editMode && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleSelectVideo(video.id); }}
+                        className="pl-4 pr-1 py-3 flex-shrink-0"
+                      >
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          {selectedIds.has(video.id) ? (
+                            <>
+                              <rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" className="text-red-500" stroke="none" />
+                              <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" />
+                            </>
+                          ) : (
+                            <rect x="3" y="3" width="18" height="18" rx="2" className="text-neutral-500" />
+                          )}
+                        </svg>
+                      </button>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      {renderVideoItem(video, i, videoDrag, { showDelete: !editMode })}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

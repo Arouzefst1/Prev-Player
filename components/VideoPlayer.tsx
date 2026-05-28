@@ -36,6 +36,8 @@ interface VideoPlayerProps {
   showLibraryButton?: boolean;
   // External fullscreen container (wraps player + library)
   fullscreenContainerRef?: React.RefObject<HTMLDivElement>;
+  // Callback to expose the video element ref to parent
+  onVideoRef?: (el: HTMLVideoElement | null) => void;
 }
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -46,6 +48,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   startFullscreen,
   onOpenLibrary, showLibraryButton,
   fullscreenContainerRef,
+  onVideoRef,
 }) => {
   const wasFullscreenBeforeDialogRef = useRef<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -96,6 +99,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setCodecSupport(support);
     console.log('Detected codec support:', support);
   }, []);
+
+  // --- Effect: Expose video ref to parent ---
+  useEffect(() => {
+    onVideoRef?.(videoRef.current);
+    return () => onVideoRef?.(null);
+  }, [onVideoRef]);
 
   // --- Effect: Restore saved playback position once metadata is loaded ---
   useEffect(() => {
