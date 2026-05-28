@@ -12,6 +12,7 @@ interface PlayerControlsProps {
   playbackSpeed: number;
   hasSubtitles: boolean;
   subtitlesEnabled: boolean;
+  isLooping: boolean;
   onPlayPause: () => void;
   onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onSeekStart: () => void;
@@ -21,9 +22,20 @@ interface PlayerControlsProps {
   onToggleFullscreen: () => void;
   onSpeedChange: (speed: number) => void;
   onToggleSubtitles: () => void;
+  onToggleLoop: () => void;
+  onTogglePip: () => void;
+  isPip: boolean;
   isFullscreen: boolean;
   isRemainingTimeMode: boolean;
   onToggleTimeDisplay: () => void;
+  // Playlist navigation
+  onNext?: () => void;
+  onPrev?: () => void;
+  hasNext?: boolean;
+  hasPrev?: boolean;
+  // Queue
+  onToggleQueue?: () => void;
+  showQueue?: boolean;
 }
 
 const PlayerControls: React.FC<PlayerControlsProps> = ({
@@ -36,6 +48,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   playbackSpeed,
   hasSubtitles,
   subtitlesEnabled,
+  isLooping,
   onPlayPause,
   onSeek,
   onSeekStart,
@@ -45,9 +58,18 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   onToggleFullscreen,
   onSpeedChange,
   onToggleSubtitles,
+  onToggleLoop,
+  onTogglePip,
+  isPip,
   isFullscreen,
   isRemainingTimeMode,
-  onToggleTimeDisplay
+  onToggleTimeDisplay,
+  onNext,
+  onPrev,
+  hasNext,
+  hasPrev,
+  onToggleQueue,
+  showQueue,
 }) => {
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -90,8 +112,8 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
 
   return (
     <div
-      className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-2 sm:px-4 pb-2 sm:pb-4 pt-8 sm:pt-14 transition-opacity duration-300 ease-in-out z-20 ${
-        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-2 sm:px-4 pb-2 sm:pb-4 pt-8 sm:pt-14 transition-all duration-200 ease-out z-20 ${
+        visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
       }`}
     >
       {/* Progress Bar Container */}
@@ -133,6 +155,20 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
       <div className="flex items-center justify-between flex-wrap gap-1.5 sm:gap-4">
         {/* Left Controls */}
         <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
+          {/* Previous Track */}
+          {hasPrev && (
+            <button
+              onClick={onPrev}
+              className="text-white/70 hover:text-white transition-colors p-1 active:scale-90"
+              title="Previous"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className="sm:w-6 sm:h-6">
+                <rect x="3" y="5" width="3" height="14" rx="1" />
+                <polygon points="21,5 9,12 21,19" />
+              </svg>
+            </button>
+          )}
+
           <button
             onClick={onPlayPause}
             className="text-white hover:text-gray-200 transition-colors p-1 sm:p-1.5 active:scale-95"
@@ -141,10 +177,74 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             {isPlaying ? <Pause size={24} className="sm:w-7 sm:h-7" fill="currentColor" /> : <Play size={24} className="sm:w-7 sm:h-7" fill="currentColor" />}
           </button>
 
-          {/* Volume Controls */}
+          {/* Next Track */}
+          {hasNext && (
+            <button
+              onClick={onNext}
+              className="text-white/70 hover:text-white transition-colors p-1 active:scale-90"
+              title="Next"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className="sm:w-6 sm:h-6">
+                <polygon points="3,5 15,12 3,19" />
+                <rect x="18" y="5" width="3" height="14" rx="1" />
+              </svg>
+            </button>
+          )}
+
+          {/* Volume Controls - Animated SVG */}
           <div className="flex items-center gap-1 sm:gap-2 group/vol relative">
             <button onClick={onToggleMute} className="text-white hover:text-gray-200 transition-colors p-1 active:scale-95">
-              {isMuted || volume === 0 ? <VolumeX size={20} className="sm:w-6 sm:h-6" /> : <Volume2 size={20} className="sm:w-6 sm:h-6" />}
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className="sm:w-6 sm:h-6 transition-transform duration-150">
+                {/* Speaker body */}
+                <path d="M11 5L6 9H2v6h4l5 4V5z" fill="white" />
+                {isMuted || volume === 0 ? (
+                  /* X mark for muted */
+                  <>
+                    <line x1="16" y1="9" x2="22" y2="15" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" />
+                    <line x1="22" y1="9" x2="16" y2="15" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" />
+                  </>
+                ) : (
+                  /* Animated wave arcs based on volume level */
+                  <>
+                    <path
+                      d="M15.5 8.5a3.5 3.5 0 010 7"
+                      stroke="white"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      className="transition-all duration-300"
+                      style={{
+                        opacity: volume > 0 ? 1 : 0,
+                        transform: volume > 0 ? 'scaleY(1)' : 'scaleY(0)',
+                        transformOrigin: 'center',
+                      }}
+                    />
+                    <path
+                      d="M17.5 6.5a6.5 6.5 0 010 11"
+                      stroke="white"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      className="transition-all duration-300"
+                      style={{
+                        opacity: volume > 0.33 ? 1 : 0,
+                        transform: volume > 0.33 ? 'scaleY(1)' : 'scaleY(0)',
+                        transformOrigin: 'center',
+                      }}
+                    />
+                    <path
+                      d="M19.5 4.5a9.5 9.5 0 010 15"
+                      stroke="white"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      className="transition-all duration-300"
+                      style={{
+                        opacity: volume > 0.66 ? 1 : 0,
+                        transform: volume > 0.66 ? 'scaleY(1)' : 'scaleY(0)',
+                        transformOrigin: 'center',
+                      }}
+                    />
+                  </>
+                )}
+              </svg>
             </button>
             <div className="hidden sm:flex w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300 ease-out items-center">
               <input
@@ -158,6 +258,38 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
               />
             </div>
           </div>
+
+          {/* Loop Button - Next to Volume */}
+          <button
+            onClick={onToggleLoop}
+            className={`p-1 transition-all duration-300 active:scale-95 relative ${
+              isLooping 
+                ? 'text-red-500' 
+                : 'text-white/50 hover:text-white'
+            }`}
+            title={isLooping ? 'Loop: On' : 'Loop: Off'}
+          >
+            <svg 
+              width="20" 
+              height="20" 
+              viewBox="0 0 24 24" 
+              fill="none" 
+              stroke="currentColor" 
+              strokeWidth="2" 
+              strokeLinecap="round" 
+              strokeLinejoin="round"
+              className={`sm:w-6 sm:h-6 transition-transform duration-500 ${isLooping ? 'rotate-0' : 'rotate-180'}`}
+            >
+              <path d="M17 2l4 4-4 4" />
+              <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+              <path d="M7 22l-4-4 4-4" />
+              <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+            </svg>
+            {/* Active indicator dot */}
+            {isLooping && (
+              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+            )}
+          </button>
 
           {/* Time Display - Next to Volume */}
           <button 
@@ -226,6 +358,36 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
                 </div>
             )}
           </div>
+
+          {/* Queue Toggle */}
+          {onToggleQueue && (
+            <button
+              onClick={onToggleQueue}
+              className={`transition-colors p-1 active:scale-95 ${showQueue ? 'text-red-500' : 'text-white/70 hover:text-white'}`}
+              title="Queue (q)"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="sm:w-6 sm:h-6">
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <line x1="3" y1="6" x2="3.01" y2="6" strokeWidth="3" strokeLinecap="round" />
+                <line x1="3" y1="12" x2="3.01" y2="12" strokeWidth="3" strokeLinecap="round" />
+                <line x1="3" y1="18" x2="3.01" y2="18" strokeWidth="3" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
+
+          {/* Picture-in-Picture Button */}
+          <button
+            onClick={onTogglePip}
+            className={`transition-colors p-1 active:scale-95 ${isPip ? 'text-red-500' : 'text-white/70 hover:text-white'}`}
+            title="Picture-in-Picture (p)"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="sm:w-6 sm:h-6">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <rect x="12" y="9" width="8" height="6" rx="1" ry="1" fill={isPip ? 'currentColor' : 'none'} strokeWidth="1.5" />
+            </svg>
+          </button>
 
           <button
             onClick={onToggleFullscreen}

@@ -1,23 +1,19 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Upload, FileVideo, AlertCircle, List, X, Trash2, Save, FolderOpen, History } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Upload, FileVideo, AlertCircle, List, X, Trash2, FolderOpen, History, Play, Library } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
-import { srtToVtt } from './utils';
+import VideoLibrary from './components/VideoLibrary';
+import { srtToVtt, extractVideoThumbnail, getVideoDuration, videoStore, VideoMeta, videoOrderStore } from './utils';
 
 interface PlaylistItem {
   id: string;
-  src: string;
+  src: string;       // blob URL for playback
   name: string;
   subtitleSrc?: string;
-  file?: File; // Keep reference if available (for name mainly)
+  file?: File;
+  thumbnail?: string;
 }
 
-interface HistoryItem {
-  id: string;
-  src: string;
-  name: string;
-  subtitleSrc?: string;
-  addedAt: number;
-}
+const STORAGE_LAST_VIDEO = 'prevplayer_last_video';
 
 function App() {
   const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
@@ -25,173 +21,211 @@ function App() {
   const [showPlaylist, setShowPlaylist] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [recentVideos, setRecentVideos] = useState<HistoryItem[]>([]);
+  const [videoLibrary, setVideoLibrary] = useState<VideoMeta[]>([]);
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
+  const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
+  const isFullscreenRef = useRef(false);
+  const playerWrapperRef = useRef<HTMLDivElement>(null);
+  const videoPlayerRef = useRef<{ isPlaying: boolean }>(null);
 
-  // Add video to history (max 5)
-  const addToHistory = useCallback((video: PlaylistItem) => {
-    setRecentVideos(prev => {
-      // Don't add if it's already the most recent
-      if (prev.length > 0 && prev[0].src === video.src) return prev;
-      
-      const historyItem: HistoryItem = {
-        id: video.id,
-        src: video.src,
-        name: video.name,
-        subtitleSrc: video.subtitleSrc,
-        addedAt: Date.now()
-      };
-      
-      // Remove if already exists, then add to front, keep max 5
-      const filtered = prev.filter(v => v.src !== video.src);
-      return [historyItem, ...filtered].slice(0, 5);
-    });
+  // Load library from IndexedDB on mount
+  useEffect(() => {
+    const loadLibrary = async () => {
+      let metas: VideoMeta[] = [];
+      try {
+        metas = await videoStore.getAllMeta();
+        setVideoLibrary(metas);
+      } catch (e) {
+        console.log('Failed to load library from IndexedDB');
+      }
+
+      // Load last video metadata from localStorage (just metadata, not blob)
+      const lastVid = localStorage.getItem(STORAGE_LAST_VIDEO);
+      if (lastVid) {
+        try {
+          const last: VideoMeta = JSON.parse(lastVid);
+          // Verify it still exists in IndexedDB
+          if (metas.some(v => v.id === last.id)) {
+            setLastVideo(last);
+          } else {
+            // Stale entry, clear it
+            localStorage.removeItem(STORAGE_LAST_VIDEO);
+          }
+        } catch (e) {
+          console.log('Failed to load last video');
+          localStorage.removeItem(STORAGE_LAST_VIDEO);
+        }
+      }
+    };
+
+    loadLibrary();
   }, []);
 
-  // Play a video immediately (used by Change Video button)
-  const playVideoImmediately = useCallback((files: FileList | File[]) => {
+  // Save last played video metadata
+  useEffect(() => {
+    if (playlist.length > 0 && playlist[currentIndex]) {
+      const video = playlist[currentIndex];
+      // Find in library
+      const libraryEntry = videoLibrary.find(v => v.id === video.id);
+      if (libraryEntry) {
+        setLastVideo(libraryEntry);
+        localStorage.setItem(STORAGE_LAST_VIDEO, JSON.stringify(libraryEntry));
+      }
+    }
+  }, [playlist, currentIndex, videoLibrary]);
+
+  // Add video to IndexedDB library with metadata
+  const addToLibrary = useCallback(async (file: File): Promise<VideoMeta> => {
+    // Check if already exists
+    const exists = await videoStore.exists(file.name, file.size);
+    if (exists) {
+      const metas = await videoStore.getAllMeta();
+      const existing = metas.find(v => v.name === file.name && v.size === file.size)!;
+      return existing;
+    }
+
+    const id = Math.random().toString(36).substr(2, 9);
+    
+    // Create a blob URL for thumbnail/duration extraction
+    const blobUrl = URL.createObjectURL(file);
+    
+    let thumbnail: string | undefined;
+    let duration: number | undefined;
+
+    // Extract thumbnail
+    try {
+      thumbnail = await extractVideoThumbnail(blobUrl);
+    } catch (e) {
+      console.log('Failed to extract thumbnail');
+    }
+
+    // Get duration
+    try {
+      duration = await getVideoDuration(blobUrl);
+    } catch (e) {
+      console.log('Failed to get duration');
+    }
+
+    // Clean up temp blob URL
+    URL.revokeObjectURL(blobUrl);
+
+    // Store the actual blob in IndexedDB
+    await videoStore.save({
+      id,
+      name: file.name,
+      blob: file,   // File extends Blob, so this works directly
+      thumbnail,
+      size: file.size,
+      addedAt: Date.now(),
+      duration,
+      type: file.type,
+    });
+
+    const meta: VideoMeta = {
+      id,
+      name: file.name,
+      thumbnail,
+      size: file.size,
+      addedAt: Date.now(),
+      duration,
+      type: file.type,
+    };
+
+    // Update state
+    setVideoLibrary(prev => [meta, ...prev]);
+
+    return meta;
+  }, []);
+
+  // Play video from library - gets blob URL from IndexedDB
+  const playFromLibrary = useCallback(async (video: VideoMeta) => {
+    // Capture the current playing state before switching videos
+    const shouldAutoPlay = wasPlayingBeforeLibrary;
+    setIsLoading(true);
+    try {
+      const blobUrl = await videoStore.getBlobUrl(video.id);
+      if (!blobUrl) {
+        setError('Video data not found. It may have been cleared from storage.');
+        setIsLoading(false);
+        return;
+      }
+
+      const playlistItem: PlaylistItem = {
+        id: video.id,
+        src: blobUrl,
+        name: video.name,
+      };
+
+      setPlaylist([playlistItem]);
+      setCurrentIndex(0);
+      setShowLibrary(false);
+      // Preserve the playing state — if video was paused before library opened, new video stays paused
+      setWasPlayingBeforeLibrary(shouldAutoPlay);
+    } catch (e) {
+      setError('Failed to load video from library.');
+    }
+    setIsLoading(false);
+  }, [wasPlayingBeforeLibrary]);
+
+  // Delete from library (IndexedDB)
+  const deleteFromLibrary = useCallback(async (id: string) => {
+    await videoStore.delete(id);
+    setVideoLibrary(prev => prev.filter(v => v.id !== id));
+  }, []);
+
+  // Handle file selection - add to library AND auto-play the first selected video
+  const handleFileSelect = async (files: FileList | File[]) => {
     const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
     
     if (videoFiles.length === 0) {
-      setError("Please select a video file.");
+      setError("Please select video files.");
       return;
     }
 
-    // Save current video to history before switching
-    if (playlist.length > 0 && playlist[currentIndex]) {
-      addToHistory(playlist[currentIndex]);
-    }
-
-    const file = videoFiles[0];
-    const newVideo: PlaylistItem = {
-      id: Math.random().toString(36).substr(2, 9),
-      src: URL.createObjectURL(file),
-      name: file.name,
-      file: file
-    };
-
-    // Replace current video in playlist or add as first
-    if (playlist.length === 0) {
-      setPlaylist([newVideo]);
-      setCurrentIndex(0);
-    } else {
-      // Replace current video
-      const newPlaylist = [...playlist];
-      newPlaylist[currentIndex] = newVideo;
-      setPlaylist(newPlaylist);
-    }
-    
+    setIsLoading(true);
     setError(null);
-  }, [playlist, currentIndex, addToHistory]);
 
-  // Play video from history
-  const playFromHistory = useCallback((historyItem: HistoryItem) => {
-    // Save current video to history before switching
-    if (playlist.length > 0 && playlist[currentIndex]) {
-      addToHistory(playlist[currentIndex]);
+    // Add all videos to library
+    const addedMetas: VideoMeta[] = [];
+    for (const file of videoFiles) {
+      const meta = await addToLibrary(file);
+      addedMetas.push(meta);
     }
 
-    const newVideo: PlaylistItem = {
-      id: historyItem.id,
-      src: historyItem.src,
-      name: historyItem.name,
-      subtitleSrc: historyItem.subtitleSrc
-    };
-
-    if (playlist.length === 0) {
-      setPlaylist([newVideo]);
-      setCurrentIndex(0);
-    } else {
-      const newPlaylist = [...playlist];
-      newPlaylist[currentIndex] = newVideo;
-      setPlaylist(newPlaylist);
-    }
-
-    // Remove from history since it's now playing
-    setRecentVideos(prev => prev.filter(v => v.id !== historyItem.id));
-  }, [playlist, currentIndex, addToHistory]);
-
-  const addToPlaylist = (files: FileList | File[]) => {
-    const newItems: PlaylistItem[] = [];
-    let subtitleFile: File | null = null;
-    let videoFiles: File[] = [];
-
-    // Separate subtitles and videos
-    Array.from(files).forEach(file => {
-      if (file.name.endsWith('.vtt') || file.name.endsWith('.srt')) {
-        subtitleFile = file;
-      } else if (file.type.startsWith('video/')) {
-        videoFiles.push(file);
-      }
-    });
-
-    if (videoFiles.length === 0 && !subtitleFile) {
-        setError("Please drop a video file.");
-        return;
-    }
-
-    // Process Subtitle
-    let subUrl: string | undefined = undefined;
-    if (subtitleFile) {
-        // If dropping JUST a subtitle, try to apply to current video
-        if (videoFiles.length === 0 && playlist.length > 0) {
-            const updatedPlaylist = [...playlist];
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                 const text = e.target?.result as string;
-                 const vttText = (subtitleFile as File).name.endsWith('.srt') ? srtToVtt(text) : text;
-                 const blob = new Blob([vttText], { type: 'text/vtt' });
-                 const subBlobUrl = URL.createObjectURL(blob);
-                 
-                 updatedPlaylist[currentIndex].subtitleSrc = subBlobUrl;
-                 setPlaylist(updatedPlaylist);
-            };
-            reader.readAsText(subtitleFile);
-            return; // Done
-        } else {
-             // Will attach to the first video being added
-             // Note: Async nature makes this tricky in a loop, simpler to just allow single sub drop or attach to all dropped? 
-             // Let's attach to the first video for now.
-             const reader = new FileReader();
-             reader.onload = (e) => {
-                  const text = e.target?.result as string;
-                  const vttText = (subtitleFile as File).name.endsWith('.srt') ? srtToVtt(text) : text;
-                  const blob = new Blob([vttText], { type: 'text/vtt' });
-                  subUrl = URL.createObjectURL(blob);
-                  
-                  // Update the item after it was added (react state update)
-                  // Simplified: user drops video + sub together
-             };
-             reader.readAsText(subtitleFile);
-        }
-    }
-
-    // Process Videos
-    videoFiles.forEach((file) => {
-        newItems.push({
-            id: Math.random().toString(36).substr(2, 9),
-            src: URL.createObjectURL(file),
-            name: file.name,
-            file: file
+    // Auto-play: create blob URLs and set playlist
+    const playlistItems: PlaylistItem[] = [];
+    for (const file of videoFiles) {
+      const meta = addedMetas.find(m => m.name === file.name && m.size === file.size);
+      if (meta) {
+        // Create a fresh blob URL directly from the File object for immediate playback
+        const blobUrl = URL.createObjectURL(file);
+        playlistItems.push({
+          id: meta.id,
+          src: blobUrl,
+          name: meta.name,
         });
-    });
-
-    if (newItems.length > 0) {
-        // If we had a sub waiting (race condition handled poorly above, so let's do a simple fix: 
-        // If user drops multiple files, we assume 1 video 1 sub or multiple videos. 
-        // Realistically, sub loading is better done individually.
-        // We will just add videos. Subtitles handled by dropping ON the player.
-        setPlaylist(prev => [...prev, ...newItems]);
-        setError(null);
+      }
     }
+
+    if (playlistItems.length > 0) {
+      setPlaylist(playlistItems);
+      setCurrentIndex(0);
+      setWasPlayingBeforeLibrary(true);
+    }
+
+    setIsLoading(false);
   };
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      addToPlaylist(e.dataTransfer.files);
+      handleFileSelect(e.dataTransfer.files);
     }
-  }, [playlist, currentIndex]);
+  }, []);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -203,191 +237,303 @@ function App() {
     setIsDragging(false);
   }, []);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      addToPlaylist(e.target.files);
+      handleFileSelect(e.target.files);
     }
   };
 
   const playNext = () => {
-      if (currentIndex < playlist.length - 1) {
-          setCurrentIndex(prev => prev + 1);
-      }
+    isFullscreenRef.current = !!document.fullscreenElement;
+    if (currentIndex < playlist.length - 1) {
+      setCurrentIndex(prev => prev + 1);
+      setWasPlayingBeforeLibrary(true);
+    } else if (isPlaylistLooping && playlist.length > 0) {
+      setCurrentIndex(0);
+      setWasPlayingBeforeLibrary(true);
+    }
   };
 
-  const removeVideo = (e: React.MouseEvent, index: number) => {
-      e.stopPropagation();
-      const newPlaylist = playlist.filter((_, i) => i !== index);
-      setPlaylist(newPlaylist);
-      if (index < currentIndex) {
-          setCurrentIndex(prev => prev - 1);
-      } else if (index === currentIndex && newPlaylist.length > 0) {
-          setCurrentIndex(0); // Reset to start if current deleted
-      } else if (newPlaylist.length === 0) {
-          setCurrentIndex(0);
-      }
+  const playPrev = () => {
+    isFullscreenRef.current = !!document.fullscreenElement;
+    if (currentIndex > 0) {
+      setCurrentIndex(prev => prev - 1);
+      setWasPlayingBeforeLibrary(true);
+    }
   };
 
-  const savePlaylist = () => {
-      // Save metadata only (filenames), as we can't save blobs
-      const data = JSON.stringify(playlist.map(p => ({ name: p.name })));
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'playlist.json';
-      a.click();
-      URL.revokeObjectURL(url);
+  const jumpTo = (index: number) => {
+    isFullscreenRef.current = !!document.fullscreenElement;
+    if (index >= 0 && index < playlist.length) {
+      setCurrentIndex(index);
+      setWasPlayingBeforeLibrary(true);
+    }
   };
+
+  // Handle queue reorder from the player
+  const handleReorderPlaylist = useCallback((reordered: { id: string; name: string; thumbnail?: string }[]) => {
+    // Find the currently playing video to maintain playback position
+    const currentId = playlist[currentIndex]?.id;
+    const newPlaylist = reordered.map(item => {
+      const existing = playlist.find(p => p.id === item.id);
+      return existing || { id: item.id, src: '', name: item.name, thumbnail: item.thumbnail };
+    }).filter(p => p.src); // Only keep items that have valid sources
+    
+    setPlaylist(newPlaylist);
+    // Maintain current video position after reorder
+    const newIndex = newPlaylist.findIndex(p => p.id === currentId);
+    if (newIndex >= 0) setCurrentIndex(newIndex);
+  }, [playlist, currentIndex]);
+
+  // Play a folder/playlist of videos
+  const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean) => {
+    if (videoIds.length === 0) return;
+    setIsLoading(true);
+    setIsPlaylistLooping(loop);
+
+    let orderedIds = [...videoIds];
+    if (shuffle) {
+      // Fisher-Yates shuffle
+      for (let i = orderedIds.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [orderedIds[i], orderedIds[j]] = [orderedIds[j], orderedIds[i]];
+      }
+    }
+
+    const playlistItems: PlaylistItem[] = [];
+    for (const id of orderedIds) {
+      try {
+        const blobUrl = await videoStore.getBlobUrl(id);
+        if (blobUrl) {
+          const meta = videoLibrary.find(v => v.id === id);
+          playlistItems.push({
+            id,
+            src: blobUrl,
+            name: meta?.name || 'Unknown',
+            thumbnail: meta?.thumbnail,
+          });
+        }
+      } catch (e) {
+        console.error('Failed to load video', id);
+      }
+    }
+
+    if (playlistItems.length > 0) {
+      setPlaylist(playlistItems);
+      setCurrentIndex(0);
+      setWasPlayingBeforeLibrary(true);
+      setShowLibrary(false);
+    }
+    setIsLoading(false);
+  }, [videoLibrary]);
+
+  // Reorder handler for library
+  const handleReorderVideos = useCallback((orderedIds: string[]) => {
+    videoOrderStore.setOrder(orderedIds);
+  }, []);
+
+  // Add videos from PC to a specific folder (import to library + add to folder, no auto-play)
+  const handleAddToFolder = useCallback(async (files: FileList | File[], folderId: string) => {
+    const videoFiles = Array.from(files).filter(f => f.type.startsWith('video/'));
+    if (videoFiles.length === 0) return;
+
+    setIsLoading(true);
+    for (const file of videoFiles) {
+      const meta = await addToLibrary(file);
+      // Also add to the folder
+      const { folderStore } = await import('./utils');
+      folderStore.addVideo(folderId, meta.id);
+    }
+    setIsLoading(false);
+  }, [addToLibrary]);
 
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
-      {playlist.length > 0 ? (
-        <div className="relative w-full h-full flex">
-            
-          {/* Main Player Area */}
-          <div className={`relative flex-1 h-full bg-black transition-all duration-300 ${showPlaylist ? 'mr-0' : 'mr-0'}`}>
-              <VideoPlayer 
-                key={playlist[currentIndex].id} // Force remount on change
-                src={playlist[currentIndex].src}
-                subtitlesSrc={playlist[currentIndex].subtitleSrc}
-                autoPlay={true}
-                onEnded={playNext}
-                onChangeVideo={playVideoImmediately}
-              />
-              
-              {/* Toggle Playlist Button (Visible when sidebar is closed or if it doesn't overlap) */}
-              <button 
-                onClick={() => setShowPlaylist(!showPlaylist)}
-                className={`absolute top-2 right-2 sm:top-4 sm:right-4 z-40 bg-black/50 hover:bg-black/70 text-white p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-colors ${showPlaylist ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-                title="Toggle Playlist"
-              >
-                <List size={18} className="sm:w-5 sm:h-5" />
-              </button>
-          </div>
-
-          {/* Playlist Sidebar */}
-          <div 
-             className={`fixed right-0 top-0 bottom-0 w-full sm:w-96 bg-neutral-900 border-l border-neutral-800 shadow-2xl transform transition-transform duration-300 z-50 flex flex-col ${showPlaylist ? 'translate-x-0' : 'translate-x-full'}`}
-          >
-             <div className="p-2 sm:p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/95 backdrop-blur">
-                 <h2 className="font-bold text-base sm:text-lg">Playlist</h2>
-                 <div className="flex gap-1 sm:gap-2 items-center">
-                     <button onClick={savePlaylist} className="p-1.5 hover:bg-neutral-800 rounded text-neutral-400 hover:text-white transition-colors" title="Save Playlist JSON"><Save size={16} className="sm:w-4.5 sm:h-4.5" /></button>
-                     <label className="p-1.5 hover:bg-neutral-800 rounded cursor-pointer text-neutral-400 hover:text-white transition-colors" title="Add Videos">
-                        <FolderOpen size={16} className="sm:w-4.5 sm:h-4.5" />
-                        <input type="file" multiple accept="video/*" className="hidden" onChange={handleFileSelect} />
-                     </label>
-                     <div className="w-px h-4 bg-neutral-700 mx-0.5 sm:mx-1"></div>
-                     <button onClick={() => setShowPlaylist(false)} className="p-1.5 hover:bg-neutral-800 rounded text-neutral-400 hover:text-white transition-colors" title="Close"><X size={18} className="sm:w-5 sm:h-5" /></button>
-                 </div>
-             </div>
-             
-             <div className="flex-1 overflow-y-auto custom-scrollbar p-1.5 sm:p-2 space-y-1.5 sm:space-y-2">
-                 {playlist.map((video, index) => (
-                     <div 
-                        key={video.id}
-                        onClick={() => {
-                          setCurrentIndex(index);
-                          setShowPlaylist(false); // Auto-close on mobile
-                        }}
-                        className={`group p-2 sm:p-3 rounded-lg flex items-center justify-between cursor-pointer transition-all touch-none ${index === currentIndex ? 'bg-red-600/20 border border-red-600/50' : 'bg-neutral-800 hover:bg-neutral-700'}`}
-                     >
-                         <div className="flex items-center gap-2 sm:gap-3 overflow-hidden">
-                             <div className="text-xs text-neutral-500 font-mono w-4 flex-shrink-0">{index + 1}</div>
-                             <div className="truncate text-xs sm:text-sm font-medium text-gray-200">{video.name}</div>
-                         </div>
-                         <button 
-                            onClick={(e) => removeVideo(e, index)}
-                            className="text-neutral-500 hover:text-red-400 opacity-0 sm:opacity-0 group-hover:opacity-100 sm:group-hover:opacity-100 transition-opacity p-1 flex-shrink-0"
-                         >
-                            <Trash2 size={14} className="sm:w-4 sm:h-4" />
-                         </button>
-                     </div>
-                 ))}
-             </div>
-
-             {/* Recently Played Section */}
-             {recentVideos.length > 0 && (
-               <div className="border-t border-neutral-700">
-                 <div className="p-2 sm:p-3 flex items-center gap-2 text-neutral-400 text-xs sm:text-sm font-medium bg-neutral-800/50">
-                   <History size={12} className="sm:w-3.5 sm:h-3.5" />
-                   <span>Recently Played</span>
-                 </div>
-                 <div className="p-1.5 sm:p-2 space-y-0.5 sm:space-y-1 max-h-32 sm:max-h-48 overflow-y-auto custom-scrollbar">
-                   {recentVideos.map((video, index) => (
-                     <button
-                       key={video.id}
-                       onClick={() => {
-                         playFromHistory(video);
-                         setShowPlaylist(false);
-                       }}
-                       className="w-full text-left p-1.5 sm:p-2 rounded-lg bg-neutral-800/50 hover:bg-neutral-700 transition-all group flex items-center gap-2 sm:gap-3 touch-none"
-                     >
-                       <span className="text-xs text-neutral-500 font-mono w-4 flex-shrink-0">{index + 1}</span>
-                       <span className="text-xs sm:text-sm text-neutral-300 truncate flex-1 group-hover:text-white">
-                         {video.name}
-                       </span>
-                     </button>
-                   ))}
-                 </div>
-               </div>
-             )}
-
-             <div className="p-2 sm:p-4 bg-neutral-800 text-xs text-neutral-400 border-t border-neutral-700">
-                 Drag & drop .srt/.vtt files directly onto the player to add subtitles.
-             </div>
+      {/* Loading Overlay */}
+      {isLoading && (
+        <div className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-10 h-10 border-3 border-white/20 border-t-red-500 rounded-full animate-spin" />
+            <p className="text-neutral-300 text-sm">Loading video...</p>
           </div>
         </div>
+      )}
+
+      {playlist.length > 0 ? (
+        <div ref={playerWrapperRef} className="relative w-full h-full flex bg-black">
+          {/* Main Player Area */}
+          <div className="relative flex-1 h-full bg-black">
+            <VideoPlayer
+              key={playlist[currentIndex].id}
+              videoId={playlist[currentIndex].id}
+              src={playlist[currentIndex].src}
+              subtitlesSrc={playlist[currentIndex].subtitleSrc}
+              autoPlay={wasPlayingBeforeLibrary}
+              onEnded={playNext}
+              onChangeVideo={() => setShowLibrary(true)}
+              onFileSelect={(files) => handleFileSelect(files)}
+              onPlayStateChange={(playing) => setWasPlayingBeforeLibrary(playing)}
+              onNext={playNext}
+              onPrev={playPrev}
+              hasNext={currentIndex < playlist.length - 1 || isPlaylistLooping}
+              hasPrev={currentIndex > 0}
+              playlist={playlist.map(p => ({ id: p.id, name: p.name, thumbnail: p.thumbnail }))}
+              currentIndex={currentIndex}
+              onJumpTo={jumpTo}
+              onReorderPlaylist={handleReorderPlaylist}
+              startFullscreen={isFullscreenRef.current}
+              onOpenLibrary={() => setShowLibrary(!showLibrary)}
+              showLibraryButton={!showLibrary}
+              fullscreenContainerRef={playerWrapperRef}
+            />
+          </div>
+
+          {/* Library Modal */}
+          {showLibrary && (
+            <VideoLibrary
+              videos={videoLibrary}
+              onPlayVideo={playFromLibrary}
+              onDeleteVideo={deleteFromLibrary}
+              onClose={() => setShowLibrary(false)}
+              onAddVideos={handleFileSelect}
+              onReorderVideos={handleReorderVideos}
+              onPlayFolder={playFolder}
+              onAddToFolder={handleAddToFolder}
+            />
+          )}
+        </div>
       ) : (
-        /* Empty State */
+        /* Home Screen - Clean and Simple */
         <div 
-          className={`flex-1 flex flex-col items-center justify-center p-4 sm:p-6 md:p-8 transition-colors duration-300 ${isDragging ? 'bg-neutral-800' : 'bg-neutral-900'}`}
+          className={`flex-1 flex flex-col items-center justify-center p-4 sm:p-6 transition-colors duration-300 ${isDragging ? 'bg-neutral-800' : 'bg-neutral-900'}`}
           onDrop={onDrop}
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
         >
-          <div className={`max-w-xl w-full border-2 border-dashed rounded-2xl sm:rounded-3xl p-6 sm:p-8 md:p-12 flex flex-col items-center justify-center text-center transition-all duration-300 ${isDragging ? 'border-red-500 scale-105' : 'border-neutral-700'}`}>
-            <div className="bg-neutral-800 p-4 sm:p-6 rounded-full mb-4 sm:mb-6 shadow-2xl animate-bounce-slow">
-              <FileVideo size={40} className="sm:w-16 sm:h-16 text-red-500" />
+          <div className="w-full max-w-2xl">
+            {/* Logo & Title */}
+            <div className="text-center mb-8 sm:mb-12">
+              <div className="bg-neutral-800 w-16 h-16 sm:w-20 sm:h-20 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <FileVideo size={40} className="sm:w-12 sm:h-12 text-red-500" />
+              </div>
+              <h1 className="text-4xl sm:text-5xl font-bold mb-2 bg-gradient-to-r from-red-500 to-purple-600 bg-clip-text text-transparent">
+                PREV Player
+              </h1>
+              <p className="text-neutral-400 text-sm sm:text-base">
+                Your personal video library
+              </p>
             </div>
-            
-            <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold mb-2 sm:mb-4 bg-gradient-to-r from-red-500 to-purple-600 bg-clip-text text-transparent">
-              PREV Player
-            </h1>
-            <p className="text-neutral-400 mb-6 sm:mb-8 text-sm sm:text-base md:text-lg">
-              Drag and drop video files here, or browse to start your playlist.
-            </p>
 
-            <label className="group relative inline-flex items-center justify-center px-6 sm:px-8 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-white transition-all duration-200 bg-red-600 rounded-full hover:bg-red-700 hover:shadow-lg hover:shadow-red-500/30 cursor-pointer overflow-hidden active:scale-95">
-              <span className="mr-2"><Upload size={18} className="sm:w-5 sm:h-5" /></span>
-              <span>Select Videos</span>
-              <input 
-                type="file" 
-                multiple
-                accept="video/*" 
-                onChange={handleFileSelect} 
-                className="hidden" 
-              />
-            </label>
+            {/* Last Video Card - Compact */}
+            {lastVideo && (
+              <div className="mb-6 sm:mb-8">
+                <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3">Resume Watching</p>
+                <button
+                  onClick={() => playFromLibrary(lastVideo)}
+                  className="w-full group relative overflow-hidden rounded-lg bg-neutral-800 hover:bg-neutral-750 transition-all duration-300 hover:scale-105"
+                >
+                  <div className="flex gap-3 sm:gap-4 p-3 sm:p-4">
+                    {/* Thumbnail */}
+                    <div className="relative w-16 h-16 sm:w-20 sm:h-20 flex-shrink-0 rounded overflow-hidden bg-neutral-700">
+                      {lastVideo.thumbnail ? (
+                        <img
+                          src={lastVideo.thumbnail}
+                          alt={lastVideo.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-neutral-800">
+                          <Play size={16} className="text-neutral-600 fill-neutral-600" />
+                        </div>
+                      )}
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-all" />
+                    </div>
 
+                    {/* Info */}
+                    <div className="flex-1 flex flex-col justify-center min-w-0">
+                      <h3 className="text-sm sm:text-base font-semibold text-white truncate group-hover:text-red-400 transition-colors text-left">
+                        {lastVideo.name}
+                      </h3>
+                      <p className="text-xs text-neutral-500 text-left">
+                        Click to continue
+                      </p>
+                    </div>
+
+                    {/* Play Icon */}
+                    <div className="flex items-center justify-center">
+                      <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-red-600 group-hover:bg-red-700 flex items-center justify-center transition-all transform group-hover:scale-110">
+                        <Play size={18} className="text-white fill-white ml-0.5" />
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="space-y-3">
+              {/* Browse Videos */}
+              <label className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-red-600 rounded-lg hover:bg-red-700 hover:shadow-lg hover:shadow-red-500/30 cursor-pointer transition-all active:scale-95">
+                <Upload size={20} className="sm:w-6 sm:h-6" />
+                <span>Browse & Add Videos</span>
+                <input 
+                  type="file" 
+                  multiple
+                  accept="video/*" 
+                  onChange={handleInputChange}
+                  className="hidden" 
+                />
+              </label>
+
+              {/* View Library */}
+              {videoLibrary.length > 0 && (
+                <button
+                  onClick={() => setShowLibrary(true)}
+                  className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-all active:scale-95"
+                >
+                  <Library size={20} className="sm:w-6 sm:h-6" />
+                  <span>Library ({videoLibrary.length})</span>
+                </button>
+              )}
+            </div>
+
+            {/* Drop Zone */}
+            {!isDragging && (
+              <div className="mt-8 sm:mt-12 pt-8 border-t border-neutral-800">
+                <p className="text-center text-neutral-500 text-sm mb-4">
+                  Or drag and drop videos here
+                </p>
+                <div className={`border-2 border-dashed rounded-lg p-6 sm:p-8 text-center transition-all ${isDragging ? 'border-red-500 bg-red-500/10' : 'border-neutral-700'}`}>
+                  <p className="text-neutral-400 text-sm">
+                    All your videos will be saved to the library
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Error */}
             {error && (
-              <div className="mt-4 sm:mt-6 flex items-center text-red-400 bg-red-400/10 px-3 sm:px-4 py-2 rounded-lg animate-pulse text-sm">
-                <AlertCircle size={16} className="mr-2 flex-shrink-0 sm:w-5 sm:h-5" />
+              <div className="mt-6 flex items-center text-red-400 bg-red-400/10 px-4 py-3 rounded-lg animate-pulse text-sm">
+                <AlertCircle size={16} className="mr-2 flex-shrink-0" />
                 <span>{error}</span>
               </div>
             )}
-            
-            <div className="mt-6 sm:mt-8 md:mt-12 grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4 text-xs sm:text-sm text-neutral-500 text-left">
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">K</span> <span>Play/Pause</span></div>
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">J</span> <span>-10s</span></div>
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">L</span> <span>+10s</span></div>
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">F</span> <span>Fullscreen</span></div>
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">M</span> <span>Mute</span></div>
-               <div className="flex items-center gap-2"><span className="kbd bg-neutral-800 px-1.5 sm:px-2 py-0.5 sm:py-1 rounded border border-neutral-700 min-w-[24px] text-center text-xs">0-9</span> <span>Skip %</span></div>
-            </div>
           </div>
         </div>
+      )}
+
+      {/* Library Modal (from home screen) */}
+      {showLibrary && playlist.length === 0 && (
+        <VideoLibrary
+          videos={videoLibrary}
+          onPlayVideo={playFromLibrary}
+          onDeleteVideo={deleteFromLibrary}
+          onClose={() => setShowLibrary(false)}
+          onAddVideos={handleFileSelect}
+          onReorderVideos={handleReorderVideos}
+          onPlayFolder={playFolder}
+          onAddToFolder={handleAddToFolder}
+        />
       )}
     </div>
   );
