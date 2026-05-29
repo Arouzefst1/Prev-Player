@@ -38,6 +38,8 @@ interface VideoPlayerProps {
   fullscreenContainerRef?: React.RefObject<HTMLDivElement>;
   // Callback to expose the video element ref to parent
   onVideoRef?: (el: HTMLVideoElement | null) => void;
+  // Go back to home screen (Fix #5)
+  onGoHome?: () => void;
 }
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -49,6 +51,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onOpenLibrary, showLibraryButton,
   fullscreenContainerRef,
   onVideoRef,
+  onGoHome,
 }) => {
   const wasFullscreenBeforeDialogRef = useRef<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -727,7 +730,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       container?.removeEventListener('blur', handleWindowBlur);
       if (spaceHoldTimeoutRef.current) clearTimeout(spaceHoldTimeoutRef.current);
     };
-  }, [togglePlay, skip, volume, toggleFullscreen, togglePip, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay]);
+  }, [togglePlay, skip, volume, toggleFullscreen, togglePip, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay, toggleLoop, isLooping]);
 
 
   // Mouse activity monitoring
@@ -981,15 +984,29 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
             </div>
 
-            {/* Queue List — Draggable */}
-            <div className="flex-1 overflow-auto custom-scrollbar">
+            {/* Queue List — Draggable with auto-scroll (Fix #4) */}
+            <div className="flex-1 overflow-auto custom-scrollbar" ref={(el) => { (window as any).__queueScrollContainer = el; }}>
               {playlistInfo.map((item, i) => (
                 <div
                   key={item.id + '-' + i}
                   draggable
                   onDragStart={(e) => handleQueueDragStart(e, i)}
                   onDragEnd={handleQueueDragEnd}
-                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    // Auto-scroll when near edges (Fix #4)
+                    const container = (window as any).__queueScrollContainer as HTMLElement;
+                    if (container) {
+                      const rect = container.getBoundingClientRect();
+                      const edgeZone = 60;
+                      if (e.clientY - rect.top < edgeZone) {
+                        container.scrollBy({ top: -12, behavior: 'auto' });
+                      } else if (rect.bottom - e.clientY < edgeZone) {
+                        container.scrollBy({ top: 12, behavior: 'auto' });
+                      }
+                    }
+                  }}
                   onDrop={(e) => handleQueueDrop(e, i)}
                   onClick={() => onJumpTo?.(i)}
                   className={`w-full flex items-center gap-2 p-3 text-left transition-all duration-200 group cursor-pointer ${
@@ -1068,10 +1085,38 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   videoRef.current.play().catch(() => {});
                 }
               }}
-              className="w-full mb-4 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors active:scale-95"
+              className="w-full mb-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors active:scale-95"
             >
               Try Again
             </button>
+
+            {/* Choose Another Video (Fix #5) */}
+            {onChangeVideo && (
+              <button
+                onClick={() => {
+                  setHasError(false);
+                  setErrorMessage('');
+                  onChangeVideo();
+                }}
+                className="w-full mb-2 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors active:scale-95 border border-neutral-700"
+              >
+                Choose Another Video
+              </button>
+            )}
+
+            {/* Go Home (Fix #5) */}
+            {onGoHome && (
+              <button
+                onClick={() => {
+                  setHasError(false);
+                  setErrorMessage('');
+                  onGoHome();
+                }}
+                className="w-full mb-4 px-4 py-2 bg-neutral-800/60 hover:bg-neutral-700 text-neutral-300 text-sm font-medium rounded-lg transition-colors active:scale-95 border border-neutral-700/50"
+              >
+                Go Home
+              </button>
+            )}
 
             {/* Codec Support Info */}
             <div className="bg-neutral-800 rounded p-3 text-xs">

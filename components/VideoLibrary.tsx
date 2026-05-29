@@ -117,10 +117,14 @@ const DragHandle: React.FC<{ className?: string }> = ({ className }) => (
 );
 
 // ============================================================
-// Drag-to-Reorder Hook
+// Drag-to-Reorder Hook (with auto-scroll support — Fix #4)
 // ============================================================
 
-function useDragReorder<T extends { id: string }>(items: T[], onReorder: (items: T[]) => void) {
+function useDragReorder<T extends { id: string }>(
+  items: T[],
+  onReorder: (items: T[]) => void,
+  scrollContainerRef?: React.RefObject<HTMLElement | null>
+) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const dragNodeRef = useRef<HTMLElement | null>(null);
@@ -141,7 +145,19 @@ function useDragReorder<T extends { id: string }>(items: T[], onReorder: (items:
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     setOverIndex(index);
-  }, []);
+
+    // Auto-scroll when near edges (Fix #4)
+    const container = scrollContainerRef?.current;
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      const edgeZone = 60;
+      if (e.clientY - rect.top < edgeZone) {
+        container.scrollBy({ top: -12, behavior: 'auto' });
+      } else if (rect.bottom - e.clientY < edgeZone) {
+        container.scrollBy({ top: 12, behavior: 'auto' });
+      }
+    }
+  }, [scrollContainerRef]);
 
   const handleDragEnd = useCallback(() => {
     if (dragNodeRef.current) {
@@ -217,6 +233,12 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [addingToFolder, setAddingToFolder] = useState(false);
 
   const newFolderInputRef = useRef<HTMLInputElement>(null);
+  const videoScrollRef = useRef<HTMLDivElement>(null);
+  const folderVideoScrollRef = useRef<HTMLDivElement>(null);
+
+  // Folder rename state (Fix #2)
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameFolderValue, setRenameFolderValue] = useState('');
 
   // Load persisted order & folders on mount
   useEffect(() => {
@@ -266,7 +288,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     onReorderVideos?.(ids);
   }, [onReorderVideos]);
 
-  // Drag reorder for videos tab
+  // Drag reorder for videos tab (with scroll container ref — Fix #4)
   const videoDrag = useDragReorder(filteredVideos, (reordered) => {
     // If searching, merge back into full list
     if (searchQuery) {
@@ -276,7 +298,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     } else {
       handleVideoReorder(reordered);
     }
-  });
+  }, videoScrollRef);
 
   // Folder detail — reorder videos inside folder
   const handleFolderVideoReorder = useCallback((reordered: VideoMeta[]) => {
@@ -291,7 +313,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     ? openFolder.videoIds.map(id => videos.find(v => v.id === id)).filter(Boolean) as VideoMeta[]
     : [];
 
-  const folderDrag = useDragReorder(folderVideos, handleFolderVideoReorder);
+  const folderDrag = useDragReorder(folderVideos, handleFolderVideoReorder, folderVideoScrollRef);
 
   // Folder CRUD
   const createFolder = () => {
@@ -332,6 +354,45 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     if (!openFolder || openFolder.videoIds.length === 0) return;
     onPlayFolder?.(openFolder.videoIds, folderShuffle, folderLoop);
   };
+
+  // Folder rename (Fix #2)
+  const startRenameFolder = (id: string, currentName: string) => {
+    setRenamingFolderId(id);
+    setRenameFolderValue(currentName);
+  };
+
+  const commitRenameFolder = () => {
+    if (renamingFolderId && renameFolderValue.trim()) {
+      folderStore.rename(renamingFolderId, renameFolderValue.trim());
+      setFolders(folderStore.getAll());
+      // Also update openFolder if it's the one being renamed
+      if (openFolder?.id === renamingFolderId) {
+        setOpenFolder({ ...openFolder, name: renameFolderValue.trim() });
+      }
+    }
+    setRenamingFolderId(null);
+    setRenameFolderValue('');
+  };
+
+  const cancelRenameFolder = () => {
+    setRenamingFolderId(null);
+    setRenameFolderValue('');
+  };
+
+  // F2 keyboard shortcut for folder rename (Fix #2)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F2' && openFolder && !renamingFolderId) {
+        e.preventDefault();
+        startRenameFolder(openFolder.id, openFolder.name);
+      }
+      if (e.key === 'Escape' && renamingFolderId) {
+        cancelRenameFolder();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [openFolder, renamingFolderId]);
 
   // Edit mode helpers (Videos tab only)
   const toggleEditMode = () => {
@@ -503,7 +564,27 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               <ChevronLeft size={20} className="text-neutral-400" />
             </button>
             <div>
-              <h1 className="text-xl sm:text-2xl font-bold text-white">{openFolder.name}</h1>
+              {/* Folder name — double-click to rename (Fix #2) */}
+              {renamingFolderId === openFolder.id ? (
+                <input
+                  autoFocus
+                  type="text"
+                  value={renameFolderValue}
+                  onChange={(e) => setRenameFolderValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRenameFolder();
+                    if (e.key === 'Escape') cancelRenameFolder();
+                  }}
+                  onBlur={commitRenameFolder}
+                  className="text-xl sm:text-2xl font-bold text-white bg-neutral-800 px-2 py-0.5 rounded-lg outline-none focus:ring-2 focus:ring-red-500 min-w-[120px]"
+                />
+              ) : (
+                <h1
+                  className="text-xl sm:text-2xl font-bold text-white cursor-pointer hover:text-red-400 transition-colors"
+                  onDoubleClick={() => startRenameFolder(openFolder.id, openFolder.name)}
+                  title="Double-click to rename (or press F2)"
+                >{openFolder.name}</h1>
+              )}
               <p className="text-neutral-400 text-sm mt-0.5">{folderVideos.length} videos</p>
             </div>
           </div>
@@ -604,7 +685,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
         )}
 
         {/* Folder video list (ordered, draggable) */}
-        <div className="flex-1 overflow-auto custom-scrollbar">
+        <div className="flex-1 overflow-auto custom-scrollbar" ref={folderVideoScrollRef}>
           {folderVideos.length === 0 ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -818,7 +899,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
           )}
 
           {/* Videos content */}
-          <div className="flex-1 overflow-auto custom-scrollbar">
+          <div className="flex-1 overflow-auto custom-scrollbar" ref={videoScrollRef}>
             {filteredVideos.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <p className="text-neutral-500 text-lg">No videos found</p>
@@ -960,7 +1041,32 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                       )}
                     </div>
 
-                    <h3 className="font-semibold text-white truncate group-hover:text-red-400 transition-colors">{folder.name}</h3>
+                    {/* Folder name — double-click to rename (Fix #2) */}
+                    {renamingFolderId === folder.id ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        value={renameFolderValue}
+                        onChange={(e) => setRenameFolderValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === 'Enter') commitRenameFolder();
+                          if (e.key === 'Escape') cancelRenameFolder();
+                        }}
+                        onBlur={commitRenameFolder}
+                        onClick={(e) => e.stopPropagation()}
+                        className="font-semibold text-white bg-neutral-700 px-2 py-0.5 rounded-lg outline-none focus:ring-2 focus:ring-red-500 w-full truncate"
+                      />
+                    ) : (
+                      <h3
+                        className="font-semibold text-white truncate group-hover:text-red-400 transition-colors cursor-pointer"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          startRenameFolder(folder.id, folder.name);
+                        }}
+                        title="Double-click to rename"
+                      >{folder.name}</h3>
+                    )}
                     <p className="text-xs text-neutral-500 mt-1">{fvids.length} video{fvids.length !== 1 ? 's' : ''}</p>
 
                     {/* Delete */}

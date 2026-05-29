@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Upload, FileVideo, AlertCircle, List, X, Trash2, FolderOpen, History, Play, Library } from 'lucide-react';
+import { Upload, FileVideo, AlertCircle, List, X, Trash2, FolderOpen, History, Play, Library, FolderPlus } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
 import { srtToVtt, extractVideoThumbnail, getVideoDuration, videoStore, VideoMeta, videoOrderStore } from './utils';
@@ -16,6 +16,8 @@ function isVideoFile(file: File): boolean {
   return VIDEO_EXTENSIONS.has(ext);
 }
 
+const genId = () => Math.random().toString(36).substr(2, 9);
+
 interface PlaylistItem {
   id: string;
   src: string;       // blob URL for playback
@@ -23,6 +25,13 @@ interface PlaylistItem {
   subtitleSrc?: string;
   file?: File;
   thumbnail?: string;
+}
+
+interface ResolvedFile {
+  file: File;
+  id: string;
+  name: string;
+  isNew: boolean;    // false = already in the library (skip re-saving)
 }
 
 const STORAGE_LAST_VIDEO = 'prevplayer_last_video';
@@ -37,12 +46,14 @@ function App() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState<number>(-1); // -1 = indeterminate, 0-100 = percentage
   const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
   const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const videoPlayerRef = useRef<{ isPlaying: boolean }>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const homeFolderInputRef = useRef<HTMLInputElement>(null);
 
   // Load library from IndexedDB on mount
   useEffect(() => {
@@ -90,68 +101,85 @@ function App() {
     }
   }, [playlist, currentIndex, videoLibrary]);
 
-  // Add video to IndexedDB library with metadata
-  const addToLibrary = useCallback(async (file: File): Promise<VideoMeta> => {
-    // Check if already exists
-    const exists = await videoStore.exists(file.name, file.size);
-    if (exists) {
-      const metas = await videoStore.getAllMeta();
-      const existing = metas.find(v => v.name === file.name && v.size === file.size)!;
-      return existing;
-    }
+  // Resolve a batch of files against the library with a SINGLE metadata read for the
+  // whole batch (not one read per file, which made Edge crawl). Returns a stable id +
+  // display name for each file and flags which ones are new.
+  const resolveFiles = useCallback(async (files: File[]): Promise<ResolvedFile[]> => {
+    const metas = await videoStore.getAllMeta();
+    const index = new Map<string, VideoMeta>();
+    for (const m of metas) index.set(`${m.name}::${m.size}`, m);
 
-    const id = Math.random().toString(36).substr(2, 9);
-    
-    // Create a blob URL for thumbnail/duration extraction
-    const blobUrl = URL.createObjectURL(file);
-    
-    let thumbnail: string | undefined;
-    let duration: number | undefined;
-
-    // Extract thumbnail
-    try {
-      thumbnail = await extractVideoThumbnail(blobUrl);
-    } catch (e) {
-      console.log('Failed to extract thumbnail');
-    }
-
-    // Get duration
-    try {
-      duration = await getVideoDuration(blobUrl);
-    } catch (e) {
-      console.log('Failed to get duration');
-    }
-
-    // Clean up temp blob URL
-    URL.revokeObjectURL(blobUrl);
-
-    // Store the actual blob in IndexedDB
-    await videoStore.save({
-      id,
-      name: file.name,
-      blob: file,   // File extends Blob, so this works directly
-      thumbnail,
-      size: file.size,
-      addedAt: Date.now(),
-      duration,
-      type: file.type,
+    const seenInBatch = new Map<string, string>(); // name::size -> id, to dedupe duplicates within one selection
+    return files.map(file => {
+      const key = `${file.name}::${file.size}`;
+      const found = index.get(key);
+      if (found) return { file, id: found.id, name: found.name, isNew: false };
+      const dupId = seenInBatch.get(key);
+      if (dupId) return { file, id: dupId, name: file.name, isNew: false };
+      const id = genId();
+      seenInBatch.set(key, id);
+      return { file, id, name: file.name, isNew: true };
     });
-
-    const meta: VideoMeta = {
-      id,
-      name: file.name,
-      thumbnail,
-      size: file.size,
-      addedAt: Date.now(),
-      duration,
-      type: file.type,
-    };
-
-    // Update state
-    setVideoLibrary(prev => [meta, ...prev]);
-
-    return meta;
   }, []);
+
+  // Show new videos in the library list immediately, before their blobs finish saving.
+  const addOptimistic = useCallback((resolved: ResolvedFile[]) => {
+    const newMetas: VideoMeta[] = resolved
+      .filter(r => r.isNew)
+      .map(r => ({ id: r.id, name: r.file.name, size: r.file.size, addedAt: Date.now(), type: r.file.type }));
+    if (newMetas.length > 0) setVideoLibrary(prev => [...newMetas, ...prev]);
+  }, []);
+
+  // Extract thumbnail + duration OFF the critical path. Runs sequentially in the
+  // background so a slow-to-decode file (common in Edge) never blocks the UI or the
+  // progress overlay; thumbnails just fill in afterward.
+  const metaQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueMetaExtraction = useCallback((items: { file: File; id: string }[]) => {
+    if (items.length === 0) return;
+    metaQueueRef.current = metaQueueRef.current.then(async () => {
+      for (const { file, id } of items) {
+        const blobUrl = URL.createObjectURL(file);
+        let thumbnail: string | undefined;
+        let duration: number | undefined;
+        try { thumbnail = await extractVideoThumbnail(blobUrl); } catch (e) {}
+        try { duration = await getVideoDuration(blobUrl); } catch (e) {}
+        URL.revokeObjectURL(blobUrl);
+        if (thumbnail || duration) {
+          try { await videoStore.updateMeta(id, { thumbnail, duration }); } catch (e) {}
+          setVideoLibrary(prev => prev.map(v => v.id === id ? {
+            ...v, ...(thumbnail ? { thumbnail } : {}), ...(duration ? { duration } : {}),
+          } : v));
+        }
+      }
+    });
+  }, []);
+
+  // Persist new files' blobs to IndexedDB while driving the circular progress ring,
+  // then hand metadata extraction to the background queue. Existing files are a no-op
+  // (no overlay), so re-adding a library video is instant.
+  const persistNew = useCallback(async (resolved: ResolvedFile[]) => {
+    const newOnes = resolved.filter(r => r.isNew);
+    if (newOnes.length === 0) return;
+
+    setIsLoading(true);
+    setLoadingProgress(0);
+    for (let i = 0; i < newOnes.length; i++) {
+      const { file, id } = newOnes[i];
+      try {
+        await videoStore.save({
+          id, name: file.name, blob: file,
+          size: file.size, addedAt: Date.now(), type: file.type,
+        });
+      } catch (e) {
+        console.error('Failed to save video to IndexedDB:', e);
+      }
+      setLoadingProgress(Math.round(((i + 1) / newOnes.length) * 100));
+    }
+    setIsLoading(false);
+    setLoadingProgress(-1);
+
+    enqueueMetaExtraction(newOnes.map(r => ({ file: r.file, id: r.id })));
+  }, [enqueueMetaExtraction]);
 
   // Play video from library - gets blob URL from IndexedDB
   const playFromLibrary = useCallback(async (video: VideoMeta) => {
@@ -189,76 +217,54 @@ function App() {
     setVideoLibrary(prev => prev.filter(v => v.id !== id));
   }, []);
 
-  // Handle file selection - add to library AND auto-play the first selected video
+  // Handle file selection - add to library AND auto-play the selected videos.
+  // INSTANT: plays immediately, then saves blobs (with the progress ring) and extracts metadata in the background.
   const handleFileSelect = async (files: FileList | File[]) => {
     const videoFiles = Array.from(files).filter(f => isVideoFile(f));
-    
     if (videoFiles.length === 0) {
       setError("No playable video files found.");
       return;
     }
-
-    setIsLoading(true);
     setError(null);
 
-    // Add all videos to library
-    const addedMetas: VideoMeta[] = [];
-    for (const file of videoFiles) {
-      const meta = await addToLibrary(file);
-      addedMetas.push(meta);
-    }
+    const resolved = await resolveFiles(videoFiles);
 
-    // Auto-play: create blob URLs and set playlist
-    const playlistItems: PlaylistItem[] = [];
-    for (const file of videoFiles) {
-      const meta = addedMetas.find(m => m.name === file.name && m.size === file.size);
-      if (meta) {
-        // Create a fresh blob URL directly from the File object for immediate playback
-        const blobUrl = URL.createObjectURL(file);
-        playlistItems.push({
-          id: meta.id,
-          src: blobUrl,
-          name: meta.name,
-        });
-      }
-    }
+    // INSTANT: start playback straight from the in-memory File objects — no waiting on IndexedDB.
+    setPlaylist(resolved.map(r => ({ id: r.id, src: URL.createObjectURL(r.file), name: r.name })));
+    setCurrentIndex(0);
+    setWasPlayingBeforeLibrary(true);
 
-    if (playlistItems.length > 0) {
-      setPlaylist(playlistItems);
-      setCurrentIndex(0);
-      setWasPlayingBeforeLibrary(true);
-    }
-
-    setIsLoading(false);
+    // Show new videos in the library now, then persist + extract in the background.
+    addOptimistic(resolved);
+    await persistNew(resolved);
   };
 
-  // Handle adding files to library only (no auto-play), used from library panel
+  // Handle adding files to library only (no auto-play), used from the library panel.
   const handleAddToLibraryOnly = async (files: FileList | File[]) => {
     const videoFiles = Array.from(files).filter(f => isVideoFile(f));
     if (videoFiles.length === 0) {
       setError("No playable video files found.");
       return;
     }
-
-    setIsLoading(true);
     setError(null);
 
-    for (const file of videoFiles) {
-      await addToLibrary(file);
-    }
-
-    setIsLoading(false);
+    const resolved = await resolveFiles(videoFiles);
+    addOptimistic(resolved);
+    await persistNew(resolved);
   };
 
   // Handle importing a whole folder from PC:
   // 1. Scans for video files  2. Adds them to library  3. Creates a folder entry with the real folder name
   const handleAddFolderFromPC = useCallback(async (files: FileList | File[]) => {
     const allFiles = Array.from(files);
-    const videoFiles = allFiles.filter(f => isVideoFile(f));
+    let videoFiles = allFiles.filter(f => isVideoFile(f));
     if (videoFiles.length === 0) {
       setError('No playable video files found in this folder.');
       return;
     }
+
+    // Sort by filename to maintain consistent, predictable order (Fix #3)
+    videoFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
     // Extract the top-level folder name from webkitRelativePath (e.g. "MyVideos/clip.mp4" → "MyVideos")
     let folderName = 'Imported Folder';
@@ -268,26 +274,19 @@ function App() {
       if (parts.length >= 2) folderName = parts[0];
     }
 
-    setIsLoading(true);
     setError(null);
 
-    // Add all videos to library and collect their IDs
-    const addedIds: string[] = [];
-    for (const file of videoFiles) {
-      const meta = await addToLibrary(file);
-      addedIds.push(meta.id);
-    }
+    const resolved = await resolveFiles(videoFiles);
+    addOptimistic(resolved);
 
-    // Create a folder with the real name and link the videos
+    // Create a folder with the real name and link every video (new or pre-existing), preserving order.
     const { folderStore } = await import('./utils');
-    const folderId = Math.random().toString(36).substr(2, 9);
-    folderStore.save({ id: folderId, name: folderName, videoIds: addedIds, createdAt: Date.now() });
+    folderStore.save({ id: genId(), name: folderName, videoIds: resolved.map(r => r.id), createdAt: Date.now() });
 
-    // Force a state refresh so VideoLibrary's folder-reload effect fires after the folder is saved
+    // Persist blobs (progress ring) + background metadata, then nudge state so the folder list refreshes.
+    await persistNew(resolved);
     setVideoLibrary(prev => [...prev]);
-
-    setIsLoading(false);
-  }, [addToLibrary]);
+  }, [resolveFiles, addOptimistic, persistNew]);
 
   // Pause video when library opens
   const openLibrary = useCallback(() => {
@@ -427,29 +426,70 @@ function App() {
     const videoFiles = Array.from(files).filter(f => isVideoFile(f));
     if (videoFiles.length === 0) return;
 
-    setIsLoading(true);
-    for (const file of videoFiles) {
-      const meta = await addToLibrary(file);
-      // Also add to the folder
-      const { folderStore } = await import('./utils');
-      folderStore.addVideo(folderId, meta.id);
-    }
-    setIsLoading(false);
-  }, [addToLibrary]);
+    const resolved = await resolveFiles(videoFiles);
+    addOptimistic(resolved);
+
+    const { folderStore } = await import('./utils');
+    resolved.forEach(r => folderStore.addVideo(folderId, r.id));
+
+    await persistNew(resolved);
+    setVideoLibrary(prev => [...prev]);
+  }, [resolveFiles, addOptimistic, persistNew]);
 
   // Store reference to video element for pause/resume
   const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
     videoElRef.current = el;
   }, []);
 
+  // Go Home — clears playlist and returns to home screen (Fix #5)
+  const handleGoHome = useCallback(() => {
+    setPlaylist([]);
+    setCurrentIndex(0);
+    setShowLibrary(false);
+    setError(null);
+  }, []);
+
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
-      {/* Loading Overlay */}
+      {/* Loading Overlay — Modern Circular Progress Ring */}
       {isLoading && (
-        <div className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-10 h-10 border-3 border-white/20 border-t-red-500 rounded-full animate-spin" />
-            <p className="text-neutral-300 text-sm">Loading video...</p>
+        <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center backdrop-blur-md">
+          <div className="flex flex-col items-center gap-4">
+            {/* Circular Progress Ring */}
+            <div className="relative w-20 h-20">
+              <svg className="w-full h-full -rotate-90" viewBox="0 0 80 80">
+                {/* Background ring */}
+                <circle cx="40" cy="40" r="34" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="6" />
+                {/* Progress ring */}
+                <circle
+                  cx="40" cy="40" r="34" fill="none"
+                  stroke="url(#progressGradient)" strokeWidth="6"
+                  strokeLinecap="round"
+                  strokeDasharray={`${2 * Math.PI * 34}`}
+                  strokeDashoffset={loadingProgress >= 0
+                    ? `${2 * Math.PI * 34 * (1 - loadingProgress / 100)}`
+                    : `${2 * Math.PI * 34 * 0.75}`
+                  }
+                  className={loadingProgress < 0 ? 'animate-spin origin-center' : 'transition-all duration-300 ease-out'}
+                  style={loadingProgress < 0 ? { animationDuration: '1.2s' } : {}}
+                />
+                <defs>
+                  <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#ef4444" />
+                    <stop offset="100%" stopColor="#a855f7" />
+                  </linearGradient>
+                </defs>
+              </svg>
+              {/* Percentage text */}
+              {loadingProgress >= 0 && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-white font-bold text-lg tabular-nums">{loadingProgress}%</span>
+                </div>
+              )}
+            </div>
+            <p className="text-neutral-400 text-sm font-medium tracking-wide">
+              {loadingProgress >= 0 ? 'Processing videos...' : 'Loading...'}
+            </p>
           </div>
         </div>
       )}
@@ -481,6 +521,7 @@ function App() {
               showLibraryButton={!showLibrary}
               fullscreenContainerRef={playerWrapperRef}
               onVideoRef={handleVideoRef}
+              onGoHome={handleGoHome}
             />
           </div>
 
@@ -582,11 +623,33 @@ function App() {
                 />
               </label>
 
+              {/* Import Folder — Fix #1 */}
+              <input
+                ref={homeFolderInputRef}
+                type="file"
+                // @ts-ignore webkitdirectory is non-standard
+                webkitdirectory=""
+                directory=""
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) handleAddFolderFromPC(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => homeFolderInputRef.current?.click()}
+                className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-neutral-800 hover:bg-neutral-700 hover:shadow-lg rounded-lg cursor-pointer transition-all active:scale-95"
+              >
+                <FolderPlus size={20} className="sm:w-6 sm:h-6" />
+                <span>Import Folder</span>
+              </button>
+
               {/* View Library */}
               {videoLibrary.length > 0 && (
                 <button
                   onClick={openLibrary}
-                  className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-all active:scale-95"
+                  className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-neutral-300 bg-neutral-800/60 hover:bg-neutral-700 rounded-lg transition-all active:scale-95 border border-neutral-700/50"
                 >
                   <Library size={20} className="sm:w-6 sm:h-6" />
                   <span>Library ({videoLibrary.length})</span>

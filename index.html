@@ -230,6 +230,16 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
+      /* Progress ring pulse glow for loading indicator (Fix #6) */
+      @keyframes progressPulse {
+        0%, 100% { filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.3)); }
+        50% { filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5)); }
+      }
+
+      .animate-spin svg circle:last-of-type {
+        animation: progressPulse 2s ease-in-out infinite;
+      }
+
       @supports (font-size-adjust: 0.5) {
         body {
           font-size-adjust: 0.5;
