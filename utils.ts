@@ -40,20 +40,34 @@ export interface OverlayState {
 }
 
 /**
- * Extract thumbnail from video at specific time
+ * Extract thumbnail from video at specific time (with timeout for Edge/Firefox)
  */
 export const extractVideoThumbnail = (videoUrl: string, atTime: number = 1): Promise<string> => {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
     const canvas = document.createElement('canvas');
+    let settled = false;
+
+    const cleanup = () => {
+      video.removeAttribute('src');
+      video.load(); // force release
+    };
+
+    // Timeout: reject after 8s to avoid hanging in Edge
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; cleanup(); reject('Thumbnail extraction timed out'); }
+    }, 8000);
     
     video.addEventListener('loadedmetadata', () => {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-      video.currentTime = Math.min(atTime, video.duration * 0.1); // At 1 second or 10% in
+      video.currentTime = Math.min(atTime, video.duration * 0.1);
     });
 
     video.addEventListener('seeked', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -61,33 +75,59 @@ export const extractVideoThumbnail = (videoUrl: string, atTime: number = 1): Pro
       } else {
         reject('Failed to get canvas context');
       }
+      cleanup();
     });
 
     video.addEventListener('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
       reject('Failed to load video for thumbnail');
     });
 
     video.crossOrigin = 'anonymous';
+    video.preload = 'metadata';
     video.src = videoUrl;
   });
 };
 
 /**
- * Get video duration from Blob
+ * Get video duration from Blob (with timeout for Edge/Firefox)
  */
 export const getVideoDuration = (videoUrl: string): Promise<number> => {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
+    let settled = false;
+
+    const cleanup = () => {
+      video.removeAttribute('src');
+      video.load();
+    };
+
+    // Timeout: reject after 8s
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; cleanup(); reject('Duration extraction timed out'); }
+    }, 8000);
     
     video.addEventListener('loadedmetadata', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve(video.duration);
+      cleanup();
     });
 
     video.addEventListener('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
       reject('Failed to load video');
     });
 
     video.crossOrigin = 'anonymous';
+    video.preload = 'metadata';
     video.src = videoUrl;
   });
 };
@@ -213,20 +253,32 @@ export interface VideoMeta {
   type: string;
 }
 
+// Cache a single connection. Reopening the DB on every operation is slow,
+// especially in Edge/Firefox under the rapid sequential writes of a batch import.
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
+
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'id' });
       }
     };
-    
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      const db = request.result;
+      // Drop the cached handle if the connection is closed or superseded so the next call reopens.
+      db.onclose = () => { dbPromise = null; };
+      db.onversionchange = () => { db.close(); dbPromise = null; };
+      resolve(db);
+    };
+    request.onerror = () => { dbPromise = null; reject(request.error); };
   });
+  return dbPromise;
 }
 
 export const videoStore = {
@@ -296,10 +348,24 @@ export const videoStore = {
     });
   },
 
-  /** Check if a video with given name and size already exists */
-  async exists(name: string, size: number): Promise<boolean> {
-    const metas = await this.getAllMeta();
-    return metas.some(v => v.name === name && v.size === size);
+  /** Patch thumbnail/duration on an existing record (used by background metadata extraction) */
+  async updateMeta(id: string, patch: { thumbnail?: string; duration?: number }): Promise<void> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(id);
+      getReq.onsuccess = () => {
+        const record = getReq.result as StoredVideo | undefined;
+        if (record) {
+          if (patch.thumbnail) record.thumbnail = patch.thumbnail;
+          if (patch.duration !== undefined) record.duration = patch.duration;
+          store.put(record);
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
   },
 };
 
