@@ -1,0 +1,46 @@
+{
+  "productName": "PREV Player",
+  "version": "1.0.0",
+  "identifier": "com.prev-player.app",
+  "build": {
+    "beforeDevCommand": "npm run vite-dev",
+    "devUrl": "http://localhost:3001",
+    "beforeBuildCommand": "npm run vite-build",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "fileAssociations": [
+      {
+        "ext": ["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ogv", "ogg", "3gp", "3g2", "ts", "mts", "m2ts", "vob", "mpg", "mpeg"],
+        "name": "Video File",
+        "description": "Video files",
+        "role": "Viewer"
+      }
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PREV Player",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  }
+}

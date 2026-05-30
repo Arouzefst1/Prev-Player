@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Search, Grid, List, X, ChevronLeft } from 'lucide-react';
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  useDndContext,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { VideoMeta, Folder, folderStore, videoOrderStore } from '../utils';
 
 // ============================================================
@@ -11,11 +20,11 @@ interface VideoLibraryProps {
   onPlayVideo: (video: VideoMeta) => void;
   onDeleteVideo: (id: string) => void;
   onClose: () => void;
-  onAddVideos?: (files: FileList | File[]) => void;
+  onAddVideos?: () => void;
   onReorderVideos?: (orderedIds: string[]) => void;
-  onPlayFolder?: (videoIds: string[], shuffle: boolean, loop: boolean) => void;
-  onAddToFolder?: (files: FileList | File[], folderId: string) => void;
-  onAddFolderFromPC?: (files: FileList | File[]) => void;
+  onPlayFolder?: (videoIds: string[], shuffle: boolean, loop: boolean, startIndex?: number) => void;
+  onAddToFolder?: (folderId: string) => void;
+  onAddFolderFromPC?: () => void;
 }
 
 // ============================================================
@@ -117,81 +126,126 @@ const DragHandle: React.FC<{ className?: string }> = ({ className }) => (
 );
 
 // ============================================================
-// Drag-to-Reorder Hook (with auto-scroll support — Fix #4)
+// SortableVideoItem — uses @dnd-kit (pointer-events, not HTML5 drag)
+// so it works reliably in Tauri's WebView2 environment.
 // ============================================================
 
-function useDragReorder<T extends { id: string }>(
-  items: T[],
-  onReorder: (items: T[]) => void,
-  scrollContainerRef?: React.RefObject<HTMLElement | null>
-) {
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
-  const dragNodeRef = useRef<HTMLElement | null>(null);
-
-  const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
-    setDragIndex(index);
-    dragNodeRef.current = e.currentTarget as HTMLElement;
-    e.dataTransfer.effectAllowed = 'move';
-    // Make the dragged element semi-transparent after a frame
-    requestAnimationFrame(() => {
-      if (dragNodeRef.current) {
-        dragNodeRef.current.style.opacity = '0.4';
-      }
-    });
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    setOverIndex(index);
-
-    // Auto-scroll when near edges (Fix #4)
-    const container = scrollContainerRef?.current;
-    if (container) {
-      const rect = container.getBoundingClientRect();
-      const edgeZone = 60;
-      if (e.clientY - rect.top < edgeZone) {
-        container.scrollBy({ top: -12, behavior: 'auto' });
-      } else if (rect.bottom - e.clientY < edgeZone) {
-        container.scrollBy({ top: 12, behavior: 'auto' });
-      }
-    }
-  }, [scrollContainerRef]);
-
-  const handleDragEnd = useCallback(() => {
-    if (dragNodeRef.current) {
-      dragNodeRef.current.style.opacity = '1';
-    }
-    if (dragIndex !== null && overIndex !== null && dragIndex !== overIndex) {
-      const newItems = [...items];
-      const [moved] = newItems.splice(dragIndex, 1);
-      newItems.splice(overIndex, 0, moved);
-      onReorder(newItems);
-    }
-    setDragIndex(null);
-    setOverIndex(null);
-    dragNodeRef.current = null;
-  }, [dragIndex, overIndex, items, onReorder]);
-
-  const getItemStyle = useCallback((index: number): React.CSSProperties => {
-    if (dragIndex === null || overIndex === null) return {};
-    if (index === dragIndex) return { opacity: 0.4, transform: 'scale(1.02)' };
-    // Shift items to make room
-    if (dragIndex < overIndex) {
-      if (index > dragIndex && index <= overIndex) {
-        return { transform: 'translateY(-100%)', transition: 'transform 0.2s ease' };
-      }
-    } else {
-      if (index < dragIndex && index >= overIndex) {
-        return { transform: 'translateY(100%)', transition: 'transform 0.2s ease' };
-      }
-    }
-    return { transition: 'transform 0.2s ease' };
-  }, [dragIndex, overIndex]);
-
-  return { dragIndex, overIndex, handleDragStart, handleDragOver, handleDragEnd, getItemStyle };
+interface SortableVideoItemProps {
+  video: VideoMeta;
+  index: number;
+  onPlay: (v: VideoMeta, idx: number) => void;
+  onDelete?: (id: string) => void;
+  onRemove?: (id: string) => void;
+  numbered?: boolean;
+  editMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }
+
+const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
+  video, index, onPlay, onDelete, onRemove, numbered, editMode, selected, onToggleSelect,
+}) => {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging, isSorting, activeIndex, overIndex } = useSortable({ id: video.id });
+
+  // Spotify-style drop indicator: keep the list static and draw a red line at
+  // the edge of the row the dragged item will drop into.
+  const showDropLine = isSorting && !isDragging && index === overIndex && activeIndex !== -1 && activeIndex !== overIndex;
+  const dropLineAtBottom = activeIndex < overIndex;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: isDragging ? CSS.Transform.toString(transform) : undefined,
+        transition,
+        opacity: isDragging ? 0.4 : 1,
+        position: 'relative',
+        zIndex: isDragging ? 10 : undefined,
+      }}
+      className="flex items-center"
+    >
+      {showDropLine && (
+        <span className={`pointer-events-none absolute left-3 right-3 z-30 h-[3px] rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.9)] ${dropLineAtBottom ? 'bottom-0' : 'top-0'}`}>
+          <span className="absolute -left-1 top-1/2 -translate-y-1/2 h-2.5 w-2.5 rounded-full bg-red-500" />
+        </span>
+      )}
+
+      {/* Edit-mode checkbox */}
+      {editMode && onToggleSelect && (
+        <button onClick={(e) => { e.stopPropagation(); onToggleSelect(video.id); }} className="pl-4 pr-1 py-3 flex-shrink-0">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {selected ? (
+              <><rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" className="text-red-500" stroke="none" /><path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" /></>
+            ) : (
+              <rect x="3" y="3" width="18" height="18" rx="2" className="text-neutral-500" />
+            )}
+          </svg>
+        </button>
+      )}
+
+      <div
+        onClick={() => onPlay(video, index)}
+        className={`flex-1 flex items-center gap-3 sm:gap-4 p-3 sm:p-4 hover:bg-neutral-800/80 transition-all duration-200 group cursor-pointer border-b border-neutral-800/50 ${isDragging ? 'bg-neutral-700/50 shadow-lg shadow-black/30 rounded-lg' : ''}`}
+      >
+        {/* Drag handle — only in non-edit mode */}
+        {!editMode && (
+          <div
+            {...attributes}
+            {...listeners}
+            onClick={(e) => e.stopPropagation()}
+            className="cursor-grab active:cursor-grabbing flex flex-col gap-[3px] p-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+            title="Drag to reorder"
+          >
+            <span className="block w-4 h-[2px] bg-neutral-500 rounded" />
+            <span className="block w-4 h-[2px] bg-neutral-500 rounded" />
+            <span className="block w-4 h-[2px] bg-neutral-500 rounded" />
+          </div>
+        )}
+
+        {/* Number */}
+        {numbered && <span className="text-neutral-500 text-sm font-mono w-6 text-right flex-shrink-0">{index + 1}</span>}
+
+        {/* Thumbnail */}
+        <div className="relative w-16 h-12 sm:w-20 sm:h-14 flex-shrink-0 rounded overflow-hidden bg-neutral-700">
+          {video.thumbnail ? (
+            <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-neutral-800">
+              <Play size={16} className="text-neutral-600" fill="currentColor" />
+            </div>
+          )}
+          {video.duration && (
+            <div className="absolute bottom-0.5 right-0.5 bg-black/80 px-1 py-0.5 rounded text-[10px] text-white font-semibold">
+              {formatTime(video.duration)}
+            </div>
+          )}
+        </div>
+
+        {/* Info */}
+        <div className="flex-1 min-w-0">
+          <h3 className="text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">{video.name}</h3>
+          <p className="text-xs text-neutral-500 mt-0.5">{formatFileSize(video.size)}</p>
+        </div>
+
+        {/* Play */}
+        <button onClick={(e) => { e.stopPropagation(); onPlay(video, index); }} className="p-2 rounded-full opacity-0 group-hover:opacity-100 bg-red-600/0 group-hover:bg-red-600 transition-all duration-200">
+          <Play size={16} className="text-white fill-white" />
+        </button>
+
+        {/* Remove / Delete */}
+        {onRemove ? (
+          <button onClick={(e) => { e.stopPropagation(); onRemove(video.id); }} className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200">
+            <X size={16} />
+          </button>
+        ) : !editMode && onDelete && (
+          <button onClick={(e) => { e.stopPropagation(); onDelete(video.id); }} className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200">
+            <Trash2 size={16} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ============================================================
 // Main Component
@@ -212,9 +266,6 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [activeTab, setActiveTab] = useState<'videos' | 'folders'>('videos');
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
-  const addFileInputRef = useRef<HTMLInputElement>(null);
-  const addFolderInputRef = useRef<HTMLInputElement>(null);
-  const folderAddFileInputRef = useRef<HTMLInputElement>(null);
 
   // Videos tab — ordered list
   const [orderedVideos, setOrderedVideos] = useState<VideoMeta[]>([]);
@@ -235,6 +286,9 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const videoScrollRef = useRef<HTMLDivElement>(null);
   const folderVideoScrollRef = useRef<HTMLDivElement>(null);
+
+  // @dnd-kit pointer sensor — works in Tauri/WebView2 (HTML5 drag is intercepted there)
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
 
   // Folder rename state (Fix #2)
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
@@ -280,25 +334,13 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     ? orderedVideos.filter(v => v.name.toLowerCase().includes(searchQuery.toLowerCase()))
     : orderedVideos;
 
-  // Reorder handler for videos tab
+  // Reorder handler for videos tab (used by DndContext onDragEnd)
   const handleVideoReorder = useCallback((newOrder: VideoMeta[]) => {
     setOrderedVideos(newOrder);
     const ids = newOrder.map(v => v.id);
     videoOrderStore.setOrder(ids);
     onReorderVideos?.(ids);
   }, [onReorderVideos]);
-
-  // Drag reorder for videos tab (with scroll container ref — Fix #4)
-  const videoDrag = useDragReorder(filteredVideos, (reordered) => {
-    // If searching, merge back into full list
-    if (searchQuery) {
-      const reorderedIds = new Set(reordered.map(v => v.id));
-      const rest = orderedVideos.filter(v => !reorderedIds.has(v.id));
-      handleVideoReorder([...reordered, ...rest]);
-    } else {
-      handleVideoReorder(reordered);
-    }
-  }, videoScrollRef);
 
   // Folder detail — reorder videos inside folder
   const handleFolderVideoReorder = useCallback((reordered: VideoMeta[]) => {
@@ -312,8 +354,6 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const folderVideos: VideoMeta[] = openFolder
     ? openFolder.videoIds.map(id => videos.find(v => v.id === id)).filter(Boolean) as VideoMeta[]
     : [];
-
-  const folderDrag = useDragReorder(folderVideos, handleFolderVideoReorder, folderVideoScrollRef);
 
   // Folder CRUD
   const createFolder = () => {
@@ -429,82 +469,6 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   // Render helpers
   // ============================================================
 
-  const renderVideoItem = (
-    video: VideoMeta,
-    index: number,
-    drag: ReturnType<typeof useDragReorder>,
-    options?: { numbered?: boolean; onRemove?: (id: string) => void; showDelete?: boolean }
-  ) => (
-    <div
-      key={video.id}
-      draggable
-      onDragStart={(e) => drag.handleDragStart(e, index)}
-      onDragOver={(e) => drag.handleDragOver(e, index)}
-      onDragEnd={drag.handleDragEnd}
-      onClick={() => onPlayVideo(video)}
-      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 hover:bg-neutral-800/80 transition-all duration-200 group cursor-pointer border-b border-neutral-800/50 ${
-        drag.dragIndex === index ? 'bg-neutral-700/50 shadow-lg shadow-black/30 scale-[1.02] z-10 relative rounded-lg' : ''
-      } ${drag.overIndex === index && drag.dragIndex !== index ? 'border-t-2 border-t-red-500' : ''}`}
-    >
-      {/* Drag Handle */}
-      <DragHandle className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
-
-      {/* Number */}
-      {options?.numbered && (
-        <span className="text-neutral-500 text-sm font-mono w-6 text-right flex-shrink-0">{index + 1}</span>
-      )}
-
-      {/* Thumbnail */}
-      <div className="relative w-16 h-12 sm:w-20 sm:h-14 flex-shrink-0 rounded overflow-hidden bg-neutral-700">
-        {video.thumbnail ? (
-          <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center bg-neutral-800">
-            <Play size={16} className="text-neutral-600" fill="currentColor" />
-          </div>
-        )}
-        {video.duration && (
-          <div className="absolute bottom-0.5 right-0.5 bg-black/80 px-1 py-0.5 rounded text-[10px] text-white font-semibold">
-            {formatTime(video.duration)}
-          </div>
-        )}
-      </div>
-
-      {/* Info */}
-      <div className="flex-1 min-w-0">
-        <h3 className="text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">
-          {video.name}
-        </h3>
-        <p className="text-xs text-neutral-500 mt-0.5">{formatFileSize(video.size)}</p>
-      </div>
-
-      {/* Play */}
-      <button
-        onClick={(e) => { e.stopPropagation(); onPlayVideo(video); }}
-        className="p-2 rounded-full opacity-0 group-hover:opacity-100 bg-red-600/0 group-hover:bg-red-600 transition-all duration-200"
-      >
-        <Play size={16} className="text-white fill-white" />
-      </button>
-
-      {/* Remove / Delete */}
-      {options?.onRemove ? (
-        <button
-          onClick={(e) => { e.stopPropagation(); options.onRemove!(video.id); }}
-          className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200"
-        >
-          <X size={16} />
-        </button>
-      ) : options?.showDelete !== false && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onDeleteVideo(video.id); }}
-          className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200"
-        >
-          <Trash2 size={16} />
-        </button>
-      )}
-    </div>
-  );
-
   // Grid card (no drag in grid)
   const renderVideoCard = (video: VideoMeta) => (
     <div
@@ -601,6 +565,16 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
 
           <div className="flex-1" />
 
+          {/* Grid / List toggle — shared viewMode state */}
+          <div className="flex gap-1 bg-neutral-800 p-1 rounded-lg">
+            <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded transition-colors ${viewMode === 'grid' ? 'bg-red-600 text-white' : 'text-neutral-400 hover:text-white'}`}>
+              <Grid size={16} />
+            </button>
+            <button onClick={() => setViewMode('list')} className={`p-1.5 rounded transition-colors ${viewMode === 'list' ? 'bg-red-600 text-white' : 'text-neutral-400 hover:text-white'}`}>
+              <List size={16} />
+            </button>
+          </div>
+
           {/* Add videos from library */}
           <button
             onClick={() => setAddingToFolder(!addingToFolder)}
@@ -613,33 +587,18 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
           </button>
 
           {/* Import from PC */}
-          {onAddToFolder && (
-            <>
-              <input
-                ref={folderAddFileInputRef}
-                type="file"
-                multiple
-                accept="video/*"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files && openFolder) {
-                    onAddToFolder(e.target.files, openFolder.id);
-                  }
-                  e.target.value = '';
-                }}
-              />
-              <button
-                onClick={() => folderAddFileInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm text-neutral-300 hover:text-white transition-all active:scale-95"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-                  <polyline points="17 8 12 3 7 8" />
-                  <line x1="12" y1="3" x2="12" y2="15" />
-                </svg>
-                From PC
-              </button>
-            </>
+          {onAddToFolder && openFolder && (
+            <button
+              onClick={() => onAddToFolder(openFolder.id)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm text-neutral-300 hover:text-white transition-all active:scale-95"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              From PC
+            </button>
           )}
 
           {/* Delete folder */}
@@ -684,26 +643,76 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
           </div>
         )}
 
-        {/* Folder video list (ordered, draggable) */}
+        {/* Folder video list — list or grid, clicking a video loads the whole folder as playlist */}
         <div className="flex-1 overflow-auto custom-scrollbar" ref={folderVideoScrollRef}>
           {folderVideos.length === 0 ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
                 <p className="text-neutral-500 text-lg mb-2">No videos in this folder</p>
-                <button
-                  onClick={() => setAddingToFolder(true)}
-                  className="text-red-400 hover:text-red-300 text-sm transition-colors"
-                >
+                <button onClick={() => setAddingToFolder(true)} className="text-red-400 hover:text-red-300 text-sm transition-colors">
                   + Add some videos
                 </button>
               </div>
             </div>
-          ) : (
-            <div>
-              {folderVideos.map((video, i) =>
-                renderVideoItem(video, i, folderDrag, { numbered: true, onRemove: removeVideoFromFolder })
-              )}
+          ) : viewMode === 'grid' ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 p-4">
+              {folderVideos.map((video, i) => (
+                <div
+                  key={video.id}
+                  onClick={() => onPlayFolder?.(openFolder.videoIds, false, folderLoop, i)}
+                  className="group relative rounded-lg overflow-hidden bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-red-600/20"
+                >
+                  <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
+                    {video.thumbnail ? (
+                      <img src={video.thumbnail} alt={video.name} className="absolute inset-0 w-full h-full object-cover" />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center bg-neutral-800">
+                        <Play size={32} className="text-neutral-600" fill="currentColor" />
+                      </div>
+                    )}
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center">
+                      <div className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300">
+                        <Play size={20} className="text-white fill-white" />
+                      </div>
+                    </div>
+                    {video.duration && (
+                      <div className="absolute bottom-1 right-1 bg-black/80 px-2 py-0.5 rounded text-xs text-white font-semibold">
+                        {formatTime(video.duration)}
+                      </div>
+                    )}
+                    <div className="absolute top-1 left-1 bg-black/70 px-1.5 py-0.5 rounded text-xs text-neutral-300 font-mono">{i + 1}</div>
+                  </div>
+                  <div className="p-2">
+                    <h3 className="text-xs sm:text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">{video.name}</h3>
+                  </div>
+                </div>
+              ))}
             </div>
+          ) : (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={(event: DragEndEvent) => {
+                const { active, over } = event;
+                if (!over || active.id === over.id) return;
+                const oldIdx = folderVideos.findIndex(v => v.id === active.id);
+                const newIdx = folderVideos.findIndex(v => v.id === over.id);
+                if (oldIdx >= 0 && newIdx >= 0) handleFolderVideoReorder(arrayMove(folderVideos, oldIdx, newIdx));
+              }}
+            >
+              <SortableContext items={folderVideos.map(v => v.id)} strategy={verticalListSortingStrategy}>
+                {folderVideos.map((video, i) => (
+                  <SortableVideoItem
+                    key={video.id}
+                    video={video}
+                    index={i}
+                    numbered
+                    onPlay={(_v, idx) => onPlayFolder?.(openFolder.videoIds, false, folderLoop, idx)}
+                    onRemove={removeVideoFromFolder}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
           )}
         </div>
       </div>
@@ -726,37 +735,9 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
           {/* Add Videos Buttons */}
           {onAddVideos && (
             <>
-              {/* Hidden file input */}
-              <input
-                ref={addFileInputRef}
-                type="file"
-                multiple
-                accept="video/*,.mkv,.avi,.mov,.wmv,.flv,.ogv,.m4v,.3gp,.ts,.mts,.m2ts,.vob,.mpg,.mpeg"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) onAddVideos(e.target.files);
-                  e.target.value = '';
-                }}
-              />
-              {/* Hidden folder input */}
-              <input
-                ref={addFolderInputRef}
-                type="file"
-                // @ts-ignore webkitdirectory is non-standard
-                webkitdirectory=""
-                directory=""
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files && onAddFolderFromPC) {
-                    onAddFolderFromPC(e.target.files);
-                  }
-                  e.target.value = '';
-                }}
-              />
-              {/* Add Files button */}
+              {/* Add Files button — opens Tauri native file dialog */}
               <button
-                onClick={() => addFileInputRef.current?.click()}
+                onClick={onAddVideos}
                 className="group relative p-2 rounded-lg bg-red-600 hover:bg-red-700 transition-all duration-300 hover:scale-105 active:scale-95 hover:shadow-lg hover:shadow-red-600/30"
                 title="Add Video Files"
               >
@@ -766,19 +747,21 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
               </button>
-              {/* Add Folder button */}
-              <button
-                onClick={() => addFolderInputRef.current?.click()}
-                className="group relative p-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 hover:scale-105 active:scale-95"
-                title="Add Folder (scans for videos)"
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                  className="text-neutral-300 sm:w-6 sm:h-6 group-hover:text-white transition-colors"
+              {/* Add Folder button — opens Tauri native folder dialog */}
+              {onAddFolderFromPC && (
+                <button
+                  onClick={onAddFolderFromPC}
+                  className="group relative p-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 hover:scale-105 active:scale-95"
+                  title="Import Folder (scans for videos)"
                 >
-                  <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                  <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
-                </svg>
-              </button>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    className="text-neutral-300 sm:w-6 sm:h-6 group-hover:text-white transition-colors"
+                  >
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                    <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
+                  </svg>
+                </button>
+              )}
             </>
           )}
         </div>
@@ -930,32 +913,39 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                 ))}
               </div>
             ) : (
-              <div>
-                {filteredVideos.map((video, i) => (
-                  <div key={video.id} className="flex items-center">
-                    {editMode && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); toggleSelectVideo(video.id); }}
-                        className="pl-4 pr-1 py-3 flex-shrink-0"
-                      >
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          {selectedIds.has(video.id) ? (
-                            <>
-                              <rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" className="text-red-500" stroke="none" />
-                              <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" />
-                            </>
-                          ) : (
-                            <rect x="3" y="3" width="18" height="18" rx="2" className="text-neutral-500" />
-                          )}
-                        </svg>
-                      </button>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      {renderVideoItem(video, i, videoDrag, { showDelete: !editMode })}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={(event: DragEndEvent) => {
+                  const { active, over } = event;
+                  if (!over || active.id === over.id) return;
+                  const oldIdx = filteredVideos.findIndex(v => v.id === active.id);
+                  const newIdx = filteredVideos.findIndex(v => v.id === over.id);
+                  if (oldIdx < 0 || newIdx < 0) return;
+                  const reordered = arrayMove(filteredVideos, oldIdx, newIdx);
+                  if (searchQuery) {
+                    const reorderedIds = new Set(reordered.map(v => v.id));
+                    handleVideoReorder([...reordered, ...orderedVideos.filter(v => !reorderedIds.has(v.id))]);
+                  } else {
+                    handleVideoReorder(reordered);
+                  }
+                }}
+              >
+                <SortableContext items={filteredVideos.map(v => v.id)} strategy={verticalListSortingStrategy}>
+                  {filteredVideos.map((video, i) => (
+                    <SortableVideoItem
+                      key={video.id}
+                      video={video}
+                      index={i}
+                      onPlay={(v) => onPlayVideo(v)}
+                      onDelete={onDeleteVideo}
+                      editMode={editMode}
+                      selected={selectedIds.has(video.id)}
+                      onToggleSelect={toggleSelectVideo}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
             )}
           </div>
         </>

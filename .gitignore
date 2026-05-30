@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust / Tauri build artifacts (multi-GB — never commit)
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Tauri updater signing keys — never commit
+*.key
+*.key.pub
+/.tauri/

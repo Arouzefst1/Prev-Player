@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Default capability for PREV Player",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "dialog:allow-open",
+    "fs:read-all",
+    "opener:default",
+    "opener:allow-open-url"
+  ]
+}

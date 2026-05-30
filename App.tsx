@@ -1,99 +1,190 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Upload, FileVideo, AlertCircle, List, X, Trash2, FolderOpen, History, Play, Library, FolderPlus } from 'lucide-react';
+import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
-import { srtToVtt, extractVideoThumbnail, getVideoDuration, videoStore, VideoMeta, videoOrderStore } from './utils';
+import {
+  srtToVtt,
+  extractVideoThumbnail,
+  getVideoDuration,
+  videoStore,
+  VideoMeta,
+  videoOrderStore,
+  loadVideoProgress,
+} from './utils';
 
-// Supported video extensions for folder scanning
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.webm', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ogv', '.ogg',
   '.m4v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts', '.vob', '.mpg', '.mpeg',
 ]);
 
-function isVideoFile(file: File): boolean {
-  if (file.type.startsWith('video/')) return true;
-  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+const VIDEO_EXT_LIST = ['mp4','webm','mkv','avi','mov','wmv','flv','ogv','ogg','m4v','3gp','3g2','ts','mts','m2ts','vob','mpg','mpeg'];
+
+function isVideoPath(p: string): boolean {
+  const ext = '.' + p.split('.').pop()?.toLowerCase();
   return VIDEO_EXTENSIONS.has(ext);
+}
+
+function typeFromPath(p: string): string {
+  const ext = p.split('.').pop()?.toLowerCase() ?? '';
+  const map: Record<string, string> = {
+    mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska',
+    avi: 'video/x-msvideo', mov: 'video/quicktime', wmv: 'video/x-ms-wmv',
+    flv: 'video/x-flv', ogv: 'video/ogg', ogg: 'video/ogg',
+    m4v: 'video/mp4', '3gp': 'video/3gpp', '3g2': 'video/3gpp2',
+    ts: 'video/mp2t', mts: 'video/mp2t', m2ts: 'video/mp2t',
+    vob: 'video/mpeg', mpg: 'video/mpeg', mpeg: 'video/mpeg',
+  };
+  return map[ext] ?? 'video/mp4';
+}
+
+/** Convert a native file-system path to a URL playable by the <video> element via Tauri's asset protocol. */
+async function toPlaybackUrl(filePath: string): Promise<string> {
+  const { convertFileSrc } = await import('@tauri-apps/api/core');
+  return convertFileSrc(filePath);
 }
 
 const genId = () => Math.random().toString(36).substr(2, 9);
 
 interface PlaylistItem {
   id: string;
-  src: string;       // blob URL for playback
+  src: string;
   name: string;
   subtitleSrc?: string;
-  file?: File;
   thumbnail?: string;
-}
-
-interface ResolvedFile {
-  file: File;
-  id: string;
-  name: string;
-  isNew: boolean;    // false = already in the library (skip re-saving)
 }
 
 const STORAGE_LAST_VIDEO = 'prevplayer_last_video';
 
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
 function App() {
   const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
-  const [showPlaylist, setShowPlaylist] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [videoLibrary, setVideoLibrary] = useState<VideoMeta[]>([]);
   const [showLibrary, setShowLibrary] = useState(false);
   const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadingProgress, setLoadingProgress] = useState<number>(-1); // -1 = indeterminate, 0-100 = percentage
   const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
   const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
+  const [updateBanner, setUpdateBanner] = useState<{ version: string; url: string } | null>(null);
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
-  const videoPlayerRef = useRef<{ isPlaying: boolean }>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
-  const homeFolderInputRef = useRef<HTMLInputElement>(null);
 
-  // Load library from IndexedDB on mount
+  // Check GitHub releases for a newer version; show a banner if one is found
   useEffect(() => {
-    const loadLibrary = async () => {
+    const checkUpdate = async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const current = await getVersion();
+        const res = await fetch('https://api.github.com/repos/Arouzefst1/Prev-Player/releases/latest', {
+          headers: { Accept: 'application/vnd.github.v3+json' },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const latest = (data.tag_name ?? '').replace(/^v/, '');
+        if (!latest || latest === current) return;
+        // Simple semver comparison: split on dots, compare numerically
+        const parse = (v: string) => v.split('.').map(Number);
+        const [la, lb = 0, lc = 0] = parse(latest);
+        const [ca, cb = 0, cc = 0] = parse(current);
+        const isNewer = la > ca || (la === ca && lb > cb) || (la === ca && lb === cb && lc > cc);
+        if (isNewer) setUpdateBanner({ version: latest, url: data.html_url as string });
+      } catch {}
+    };
+    const t = setTimeout(checkUpdate, 4000); // wait for app to settle
+    return () => clearTimeout(t);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Boot: load library from IndexedDB, handle initial files from CLI args
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const boot = async () => {
+      // Load persisted library
       let metas: VideoMeta[] = [];
       try {
         metas = await videoStore.getAllMeta();
         setVideoLibrary(metas);
-      } catch (e) {
-        console.log('Failed to load library from IndexedDB');
+      } catch {}
+
+      // Restore last-played video reference
+      const lastRaw = localStorage.getItem(STORAGE_LAST_VIDEO);
+      if (lastRaw) {
+        try {
+          const last: VideoMeta = JSON.parse(lastRaw);
+          if (metas.some(v => v.id === last.id)) setLastVideo(last);
+          else localStorage.removeItem(STORAGE_LAST_VIDEO);
+        } catch { localStorage.removeItem(STORAGE_LAST_VIDEO); }
       }
 
-      // Load last video metadata from localStorage (just metadata, not blob)
-      const lastVid = localStorage.getItem(STORAGE_LAST_VIDEO);
-      if (lastVid) {
-        try {
-          const last: VideoMeta = JSON.parse(lastVid);
-          // Verify it still exists in IndexedDB
-          if (metas.some(v => v.id === last.id)) {
-            setLastVideo(last);
+      // Check for files passed on the command line (file-association double-click)
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const paths = await invoke<string[]>('get_initial_files');
+        if (paths.length > 0) handleFilePaths(paths);
+      } catch {}
+
+      // Listen for files forwarded from a second-instance launch
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        listen<string[]>('open-files', event => {
+          if (event.payload?.length) handleFilePaths(event.payload);
+        });
+      } catch {}
+
+      // Tauri window-level drag-drop: provides native file paths (unlike HTML drop which gives no path)
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        getCurrentWebview().onDragDropEvent(event => {
+          const p = event.payload as any;
+          if (p.type === 'enter' || p.type === 'over') {
+            setIsDragging(true);
+          } else if (p.type === 'drop') {
+            setIsDragging(false);
+            const dropped: string[] = p.paths ?? [];
+            const videos = dropped.filter(isVideoPath);
+            if (videos.length) handleFilePaths(videos);
           } else {
-            // Stale entry, clear it
-            localStorage.removeItem(STORAGE_LAST_VIDEO);
+            // 'leave' / cancelled
+            setIsDragging(false);
           }
-        } catch (e) {
-          console.log('Failed to load last video');
-          localStorage.removeItem(STORAGE_LAST_VIDEO);
-        }
-      }
+        });
+      } catch {}
     };
 
-    loadLibrary();
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Save last played video metadata
+  // Disable the WebView's default browser context menu app-wide so right-click
+  // never shows browser options (gives a native-app feel) — except inside text
+  // fields, where the native menu is kept so right-click copy/paste still works.
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      const el = (e.target as HTMLElement | null)?.closest('input, textarea, [contenteditable]') as HTMLElement | null;
+      const isTextField =
+        !!el &&
+        (el.tagName === 'TEXTAREA' ||
+          el.isContentEditable ||
+          (el.tagName === 'INPUT' && (el as HTMLInputElement).type !== 'range'));
+      if (!isTextField) e.preventDefault();
+    };
+    document.addEventListener('contextmenu', onContextMenu);
+    return () => document.removeEventListener('contextmenu', onContextMenu);
+  }, []);
+
+  // Save last-played video whenever the current playlist item changes
   useEffect(() => {
     if (playlist.length > 0 && playlist[currentIndex]) {
-      const video = playlist[currentIndex];
-      // Find in library
-      const libraryEntry = videoLibrary.find(v => v.id === video.id);
+      const libraryEntry = videoLibrary.find(v => v.id === playlist[currentIndex].id);
       if (libraryEntry) {
         setLastVideo(libraryEntry);
         localStorage.setItem(STORAGE_LAST_VIDEO, JSON.stringify(libraryEntry));
@@ -101,347 +192,313 @@ function App() {
     }
   }, [playlist, currentIndex, videoLibrary]);
 
-  // Resolve a batch of files against the library with a SINGLE metadata read for the
-  // whole batch (not one read per file, which made Edge crawl). Returns a stable id +
-  // display name for each file and flags which ones are new.
-  const resolveFiles = useCallback(async (files: File[]): Promise<ResolvedFile[]> => {
-    const metas = await videoStore.getAllMeta();
-    const index = new Map<string, VideoMeta>();
-    for (const m of metas) index.set(`${m.name}::${m.size}`, m);
-
-    const seenInBatch = new Map<string, string>(); // name::size -> id, to dedupe duplicates within one selection
-    return files.map(file => {
-      const key = `${file.name}::${file.size}`;
-      const found = index.get(key);
-      if (found) return { file, id: found.id, name: found.name, isNew: false };
-      const dupId = seenInBatch.get(key);
-      if (dupId) return { file, id: dupId, name: file.name, isNew: false };
-      const id = genId();
-      seenInBatch.set(key, id);
-      return { file, id, name: file.name, isNew: true };
-    });
-  }, []);
-
-  // Show new videos in the library list immediately, before their blobs finish saving.
-  const addOptimistic = useCallback((resolved: ResolvedFile[]) => {
-    const newMetas: VideoMeta[] = resolved
-      .filter(r => r.isNew)
-      .map(r => ({ id: r.id, name: r.file.name, size: r.file.size, addedAt: Date.now(), type: r.file.type }));
-    if (newMetas.length > 0) setVideoLibrary(prev => [...newMetas, ...prev]);
-  }, []);
-
-  // Extract thumbnail + duration OFF the critical path. Runs sequentially in the
-  // background so a slow-to-decode file (common in Edge) never blocks the UI or the
-  // progress overlay; thumbnails just fill in afterward.
+  // ---------------------------------------------------------------------------
+  // Background metadata extraction (thumbnail + duration)
+  // Runs sequentially off the critical path; thumbnails fill in after playback starts.
+  // ---------------------------------------------------------------------------
   const metaQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const enqueueMetaExtraction = useCallback((items: { file: File; id: string }[]) => {
+
+  const enqueueMetaExtraction = useCallback((items: { path: string; id: string }[]) => {
     if (items.length === 0) return;
     metaQueueRef.current = metaQueueRef.current.then(async () => {
-      for (const { file, id } of items) {
-        const blobUrl = URL.createObjectURL(file);
+      const { convertFileSrc } = await import('@tauri-apps/api/core');
+      for (const { path, id } of items) {
+        const fileUrl = convertFileSrc(path);
         let thumbnail: string | undefined;
         let duration: number | undefined;
-        try { thumbnail = await extractVideoThumbnail(blobUrl); } catch (e) {}
-        try { duration = await getVideoDuration(blobUrl); } catch (e) {}
-        URL.revokeObjectURL(blobUrl);
-        if (thumbnail || duration) {
-          try { await videoStore.updateMeta(id, { thumbnail, duration }); } catch (e) {}
-          setVideoLibrary(prev => prev.map(v => v.id === id ? {
-            ...v, ...(thumbnail ? { thumbnail } : {}), ...(duration ? { duration } : {}),
-          } : v));
+        try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {}
+        try { duration = await getVideoDuration(fileUrl); } catch {}
+        if (thumbnail || duration !== undefined) {
+          try { await videoStore.updateMeta(id, { thumbnail, duration }); } catch {}
+          setVideoLibrary(prev => prev.map(v =>
+            v.id === id
+              ? { ...v, ...(thumbnail ? { thumbnail } : {}), ...(duration !== undefined ? { duration } : {}) }
+              : v
+          ));
         }
       }
     });
   }, []);
 
-  // Persist new files' blobs to IndexedDB while driving the circular progress ring,
-  // then hand metadata extraction to the background queue. Existing files are a no-op
-  // (no overlay), so re-adding a library video is instant.
-  const persistNew = useCallback(async (resolved: ResolvedFile[]) => {
-    const newOnes = resolved.filter(r => r.isNew);
-    if (newOnes.length === 0) return;
+  // ---------------------------------------------------------------------------
+  // Core: add file paths to the library and build a playlist for immediate playback
+  // ---------------------------------------------------------------------------
+  const handleFilePaths = useCallback(async (paths: string[]) => {
+    const videoPaths = paths.filter(isVideoPath);
+    if (videoPaths.length === 0) { setError('No playable video files found.'); return; }
+    setError(null);
 
-    setIsLoading(true);
-    setLoadingProgress(0);
-    for (let i = 0; i < newOnes.length; i++) {
-      const { file, id } = newOnes[i];
-      try {
-        await videoStore.save({
-          id, name: file.name, blob: file,
-          size: file.size, addedAt: Date.now(), type: file.type,
-        });
-      } catch (e) {
-        console.error('Failed to save video to IndexedDB:', e);
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+
+    // Deduplicate against existing library (by path)
+    const allMetas = await videoStore.getAllMeta();
+    const byPath = new Map(allMetas.map(m => [m.path, m]));
+    const seenInBatch = new Map<string, string>(); // path -> id
+
+    const playlistItems: PlaylistItem[] = [];
+    const newMetas: VideoMeta[] = [];
+
+    for (const p of videoPaths) {
+      const existing = byPath.get(p);
+      if (existing) {
+        playlistItems.push({ id: existing.id, src: convertFileSrc(p), name: existing.name, thumbnail: existing.thumbnail });
+        continue;
       }
-      setLoadingProgress(Math.round(((i + 1) / newOnes.length) * 100));
+      // Dedupe within this batch
+      let id = seenInBatch.get(p);
+      if (!id) { id = genId(); seenInBatch.set(p, id); }
+      const name = p.replace(/\\/g, '/').split('/').pop() ?? p;
+      const meta: VideoMeta = { id, name, path: p, size: 0, addedAt: Date.now(), type: typeFromPath(p) };
+      newMetas.push(meta);
+      playlistItems.push({ id, src: convertFileSrc(p), name });
     }
-    setIsLoading(false);
-    setLoadingProgress(-1);
 
-    enqueueMetaExtraction(newOnes.map(r => ({ file: r.file, id: r.id })));
+    // Instant playback — no waiting on any storage
+    setPlaylist(playlistItems);
+    setCurrentIndex(0);
+    setWasPlayingBeforeLibrary(true);
+
+    if (newMetas.length > 0) {
+      // Show optimistically in library right away
+      setVideoLibrary(prev => [...newMetas.filter(m => !prev.some(e => e.id === m.id)), ...prev]);
+      // Persist metadata (path only — no blob) to IndexedDB
+      for (const meta of newMetas) {
+        try {
+          await videoStore.save({ id: meta.id, name: meta.name, path: meta.path, size: 0, addedAt: meta.addedAt, type: meta.type });
+        } catch {}
+      }
+      // Background: extract thumbnail + duration
+      enqueueMetaExtraction(newMetas.map(m => ({ path: m.path, id: m.id })));
+    }
   }, [enqueueMetaExtraction]);
 
-  // Play video from library - gets blob URL from IndexedDB
-  const playFromLibrary = useCallback(async (video: VideoMeta) => {
-    // Capture the current playing state before switching videos
-    const shouldAutoPlay = wasPlayingBeforeLibrary;
-    setIsLoading(true);
-    try {
-      const blobUrl = await videoStore.getBlobUrl(video.id);
-      if (!blobUrl) {
-        setError('Video data not found. It may have been cleared from storage.');
-        setIsLoading(false);
-        return;
-      }
+  // Add paths to library only (no auto-play), used from the library panel
+  const handleAddToLibraryOnly = useCallback(async (paths: string[]) => {
+    const videoPaths = paths.filter(isVideoPath);
+    if (videoPaths.length === 0) return;
 
-      const playlistItem: PlaylistItem = {
-        id: video.id,
-        src: blobUrl,
-        name: video.name,
-      };
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const allMetas = await videoStore.getAllMeta();
+    const byPath = new Map(allMetas.map(m => [m.path, m]));
+    const newMetas: VideoMeta[] = [];
 
-      setPlaylist([playlistItem]);
-      setCurrentIndex(0);
-      setShowLibrary(false);
-      // Preserve the playing state — if video was paused before library opened, new video stays paused
-      setWasPlayingBeforeLibrary(shouldAutoPlay);
-    } catch (e) {
-      setError('Failed to load video from library.');
+    for (const p of videoPaths) {
+      if (byPath.has(p)) continue;
+      const id = genId();
+      const name = p.replace(/\\/g, '/').split('/').pop() ?? p;
+      newMetas.push({ id, name, path: p, size: 0, addedAt: Date.now(), type: typeFromPath(p) });
     }
-    setIsLoading(false);
-  }, [wasPlayingBeforeLibrary]);
 
-  // Delete from library (IndexedDB)
+    if (newMetas.length > 0) {
+      setVideoLibrary(prev => [...newMetas, ...prev]);
+      for (const m of newMetas) {
+        try { await videoStore.save({ ...m }); } catch {}
+      }
+      enqueueMetaExtraction(newMetas.map(m => ({ path: m.path, id: m.id })));
+    }
+    // Nudge state so VideoLibrary refreshes folders list
+    setVideoLibrary(prev => [...prev]);
+  }, [enqueueMetaExtraction]);
+
+  // Import a whole folder: use Tauri's native folder dialog + FS to list video files
+  const handleAddFolderFromPC = useCallback(async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const folderPath = await open({ directory: true, multiple: false, title: 'Select Folder to Import' });
+    if (!folderPath || typeof folderPath !== 'string') return;
+
+    let entries: any[] = [];
+    try {
+      const { readDir } = await import('@tauri-apps/plugin-fs');
+      entries = await readDir(folderPath);
+    } catch {
+      setError('Could not read folder contents.');
+      return;
+    }
+
+    const sep = folderPath.includes('/') ? '/' : '\\';
+    const videoPaths = entries
+      .filter((e: any) => !e.isDirectory && e.name && isVideoPath(e.name))
+      .map((e: any) => e.path ?? `${folderPath}${sep}${e.name}`)
+      .sort((a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+    if (videoPaths.length === 0) { setError('No playable video files found in this folder.'); return; }
+    setError(null);
+
+    const folderName = folderPath.replace(/\\/g, '/').split('/').pop() ?? 'Imported Folder';
+
+    await handleAddToLibraryOnly(videoPaths);
+
+    // Create a folder entry in the library with the real folder name
+    const { folderStore } = await import('./utils');
+    const allMetas = await videoStore.getAllMeta();
+    const byPath = new Map(allMetas.map(m => [m.path, m]));
+    const videoIds = videoPaths.map(p => byPath.get(p)?.id).filter(Boolean) as string[];
+    if (videoIds.length) {
+      folderStore.save({ id: genId(), name: folderName, videoIds, createdAt: Date.now() });
+    }
+
+    setVideoLibrary(prev => [...prev]);
+  }, [handleAddToLibraryOnly]);
+
+  // Open native file-picker and add selected videos to library (no auto-play)
+  const handleAddFilesViaDialog = useCallback(async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const result = await open({
+      multiple: true,
+      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
+      title: 'Add Video Files',
+    });
+    if (!result) return;
+    const paths = Array.isArray(result) ? result : [result];
+    await handleAddToLibraryOnly(paths as string[]);
+  }, [handleAddToLibraryOnly]);
+
+  // Open native file-picker, play selected files immediately
+  const handleOpenFilesViaDialog = useCallback(async () => {
+    const wasFullscreen = !!document.fullscreenElement;
+    if (wasFullscreen) { try { await document.exitFullscreen(); } catch {} }
+
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const result = await open({
+      multiple: true,
+      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
+      title: 'Open Video Files',
+    });
+
+    if (result) {
+      const paths = Array.isArray(result) ? result : [result];
+      await handleFilePaths(paths as string[]);
+    }
+
+    // Restore fullscreen after dialog closes
+    if (wasFullscreen && playerWrapperRef.current && !document.fullscreenElement) {
+      setTimeout(() => playerWrapperRef.current?.requestFullscreen().catch(() => {}), 100);
+    }
+  }, [handleFilePaths]);
+
+  // Add files to a specific folder via dialog
+  const handleAddToFolder = useCallback(async (folderId: string) => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const result = await open({
+      multiple: true,
+      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
+      title: 'Add Videos to Folder',
+    });
+    if (!result) return;
+    const paths = Array.isArray(result) ? result : [result];
+    await handleAddToLibraryOnly(paths as string[]);
+
+    // Link the newly-added videos to the folder
+    const allMetas = await videoStore.getAllMeta();
+    const byPath = new Map(allMetas.map(m => [m.path, m]));
+    const { folderStore } = await import('./utils');
+    (paths as string[]).filter(isVideoPath).forEach(p => {
+      const meta = byPath.get(p);
+      if (meta) folderStore.addVideo(folderId, meta.id);
+    });
+
+    setVideoLibrary(prev => [...prev]);
+  }, [handleAddToLibraryOnly]);
+
+  // ---------------------------------------------------------------------------
+  // Play from library
+  // ---------------------------------------------------------------------------
+  const playFromLibrary = useCallback(async (video: VideoMeta) => {
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const src = convertFileSrc(video.path);
+    setPlaylist([{ id: video.id, src, name: video.name, thumbnail: video.thumbnail }]);
+    setCurrentIndex(0);
+    setShowLibrary(false);
+    setWasPlayingBeforeLibrary(true);
+  }, []);
+
+  // Play an entire folder/playlist, optionally starting at a specific index
+  const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean, startIndex = 0) => {
+    if (videoIds.length === 0) return;
+    setIsPlaylistLooping(loop);
+
+    let ids = [...videoIds];
+    if (shuffle) {
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+    }
+
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const items: PlaylistItem[] = [];
+    for (const id of ids) {
+      const meta = videoLibrary.find(v => v.id === id);
+      if (meta?.path) {
+        items.push({ id, src: convertFileSrc(meta.path), name: meta.name, thumbnail: meta.thumbnail });
+      }
+    }
+    if (items.length > 0) {
+      setPlaylist(items);
+      // On shuffle the start position is meaningless; otherwise honour the requested index
+      setCurrentIndex(shuffle ? 0 : Math.min(startIndex, items.length - 1));
+      setWasPlayingBeforeLibrary(true);
+      setShowLibrary(false);
+    }
+  }, [videoLibrary]);
+
   const deleteFromLibrary = useCallback(async (id: string) => {
     await videoStore.delete(id);
     setVideoLibrary(prev => prev.filter(v => v.id !== id));
   }, []);
 
-  // Handle file selection - add to library AND auto-play the selected videos.
-  // INSTANT: plays immediately, then saves blobs (with the progress ring) and extracts metadata in the background.
-  const handleFileSelect = async (files: FileList | File[]) => {
-    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
-    if (videoFiles.length === 0) {
-      setError("No playable video files found.");
-      return;
-    }
-    setError(null);
-
-    const resolved = await resolveFiles(videoFiles);
-
-    // INSTANT: start playback straight from the in-memory File objects — no waiting on IndexedDB.
-    setPlaylist(resolved.map(r => ({ id: r.id, src: URL.createObjectURL(r.file), name: r.name })));
-    setCurrentIndex(0);
-    setWasPlayingBeforeLibrary(true);
-
-    // Show new videos in the library now, then persist + extract in the background.
-    addOptimistic(resolved);
-    await persistNew(resolved);
-  };
-
-  // Handle adding files to library only (no auto-play), used from the library panel.
-  const handleAddToLibraryOnly = async (files: FileList | File[]) => {
-    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
-    if (videoFiles.length === 0) {
-      setError("No playable video files found.");
-      return;
-    }
-    setError(null);
-
-    const resolved = await resolveFiles(videoFiles);
-    addOptimistic(resolved);
-    await persistNew(resolved);
-  };
-
-  // Handle importing a whole folder from PC:
-  // 1. Scans for video files  2. Adds them to library  3. Creates a folder entry with the real folder name
-  const handleAddFolderFromPC = useCallback(async (files: FileList | File[]) => {
-    const allFiles = Array.from(files);
-    let videoFiles = allFiles.filter(f => isVideoFile(f));
-    if (videoFiles.length === 0) {
-      setError('No playable video files found in this folder.');
-      return;
-    }
-
-    // Sort by filename to maintain consistent, predictable order (Fix #3)
-    videoFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-
-    // Extract the top-level folder name from webkitRelativePath (e.g. "MyVideos/clip.mp4" → "MyVideos")
-    let folderName = 'Imported Folder';
-    const firstPath = (allFiles[0] as any).webkitRelativePath as string | undefined;
-    if (firstPath) {
-      const parts = firstPath.split('/');
-      if (parts.length >= 2) folderName = parts[0];
-    }
-
-    setError(null);
-
-    const resolved = await resolveFiles(videoFiles);
-    addOptimistic(resolved);
-
-    // Create a folder with the real name and link every video (new or pre-existing), preserving order.
-    const { folderStore } = await import('./utils');
-    folderStore.save({ id: genId(), name: folderName, videoIds: resolved.map(r => r.id), createdAt: Date.now() });
-
-    // Persist blobs (progress ring) + background metadata, then nudge state so the folder list refreshes.
-    await persistNew(resolved);
-    setVideoLibrary(prev => [...prev]);
-  }, [resolveFiles, addOptimistic, persistNew]);
-
-  // Pause video when library opens
+  // ---------------------------------------------------------------------------
+  // Library open/close (pause/resume video)
+  // ---------------------------------------------------------------------------
   const openLibrary = useCallback(() => {
-    // Capture the play state before pausing
-    const videoEl = videoElRef.current;
-    if (videoEl && !videoEl.paused) {
-      setWasPlayingBeforeLibrary(true);
-      videoEl.pause();
-    }
+    const el = videoElRef.current;
+    if (el && !el.paused) { setWasPlayingBeforeLibrary(true); el.pause(); }
     setShowLibrary(true);
   }, []);
 
   const closeLibrary = useCallback(() => {
     setShowLibrary(false);
-    // Resume if was playing before
-    const videoEl = videoElRef.current;
-    if (videoEl && wasPlayingBeforeLibrary) {
-      videoEl.play().catch(() => {});
-    }
+    const el = videoElRef.current;
+    if (el && wasPlayingBeforeLibrary) el.play().catch(() => {});
   }, [wasPlayingBeforeLibrary]);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFileSelect(e.dataTransfer.files);
-    }
-  }, []);
-
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
-
-  const onDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-  }, []);
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      handleFileSelect(e.target.files);
-    }
-  };
-
+  // ---------------------------------------------------------------------------
+  // Playlist navigation
+  // ---------------------------------------------------------------------------
   const playNext = () => {
     isFullscreenRef.current = !!document.fullscreenElement;
-    if (currentIndex < playlist.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-      setWasPlayingBeforeLibrary(true);
-    } else if (isPlaylistLooping && playlist.length > 0) {
-      setCurrentIndex(0);
-      setWasPlayingBeforeLibrary(true);
-    }
+    if (currentIndex < playlist.length - 1) { setCurrentIndex(i => i + 1); setWasPlayingBeforeLibrary(true); }
+    else if (isPlaylistLooping && playlist.length > 0) { setCurrentIndex(0); setWasPlayingBeforeLibrary(true); }
   };
 
   const playPrev = () => {
     isFullscreenRef.current = !!document.fullscreenElement;
-    if (currentIndex > 0) {
-      setCurrentIndex(prev => prev - 1);
-      setWasPlayingBeforeLibrary(true);
-    }
+    if (currentIndex > 0) { setCurrentIndex(i => i - 1); setWasPlayingBeforeLibrary(true); }
   };
 
   const jumpTo = (index: number) => {
     isFullscreenRef.current = !!document.fullscreenElement;
-    if (index >= 0 && index < playlist.length) {
-      setCurrentIndex(index);
-      setWasPlayingBeforeLibrary(true);
-    }
+    if (index >= 0 && index < playlist.length) { setCurrentIndex(index); setWasPlayingBeforeLibrary(true); }
   };
 
-  // Handle queue reorder from the player
   const handleReorderPlaylist = useCallback((reordered: { id: string; name: string; thumbnail?: string }[]) => {
-    // Find the currently playing video to maintain playback position
     const currentId = playlist[currentIndex]?.id;
-    const newPlaylist = reordered.map(item => {
-      const existing = playlist.find(p => p.id === item.id);
-      return existing || { id: item.id, src: '', name: item.name, thumbnail: item.thumbnail };
-    }).filter(p => p.src); // Only keep items that have valid sources
-    
+    const newPlaylist = reordered
+      .map(item => playlist.find(p => p.id === item.id))
+      .filter((p): p is PlaylistItem => !!p?.src);
     setPlaylist(newPlaylist);
-    // Maintain current video position after reorder
-    const newIndex = newPlaylist.findIndex(p => p.id === currentId);
-    if (newIndex >= 0) setCurrentIndex(newIndex);
+    const newIdx = newPlaylist.findIndex(p => p.id === currentId);
+    if (newIdx >= 0) setCurrentIndex(newIdx);
   }, [playlist, currentIndex]);
 
-  // Play a folder/playlist of videos
-  const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean) => {
-    if (videoIds.length === 0) return;
-    setIsLoading(true);
-    setIsPlaylistLooping(loop);
-
-    let orderedIds = [...videoIds];
-    if (shuffle) {
-      // Fisher-Yates shuffle
-      for (let i = orderedIds.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [orderedIds[i], orderedIds[j]] = [orderedIds[j], orderedIds[i]];
-      }
-    }
-
-    const playlistItems: PlaylistItem[] = [];
-    for (const id of orderedIds) {
-      try {
-        const blobUrl = await videoStore.getBlobUrl(id);
-        if (blobUrl) {
-          const meta = videoLibrary.find(v => v.id === id);
-          playlistItems.push({
-            id,
-            src: blobUrl,
-            name: meta?.name || 'Unknown',
-            thumbnail: meta?.thumbnail,
-          });
-        }
-      } catch (e) {
-        console.error('Failed to load video', id);
-      }
-    }
-
-    if (playlistItems.length > 0) {
-      setPlaylist(playlistItems);
-      setCurrentIndex(0);
-      setWasPlayingBeforeLibrary(true);
-      setShowLibrary(false);
-    }
-    setIsLoading(false);
-  }, [videoLibrary]);
-
-  // Reorder handler for library
   const handleReorderVideos = useCallback((orderedIds: string[]) => {
     videoOrderStore.setOrder(orderedIds);
   }, []);
 
-  // Add videos from PC to a specific folder (import to library + add to folder, no auto-play)
-  const handleAddToFolder = useCallback(async (files: FileList | File[], folderId: string) => {
-    const videoFiles = Array.from(files).filter(f => isVideoFile(f));
-    if (videoFiles.length === 0) return;
-
-    const resolved = await resolveFiles(videoFiles);
-    addOptimistic(resolved);
-
-    const { folderStore } = await import('./utils');
-    resolved.forEach(r => folderStore.addVideo(folderId, r.id));
-
-    await persistNew(resolved);
-    setVideoLibrary(prev => [...prev]);
-  }, [resolveFiles, addOptimistic, persistNew]);
-
-  // Store reference to video element for pause/resume
   const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
     videoElRef.current = el;
   }, []);
 
-  // Go Home — clears playlist and returns to home screen (Fix #5)
   const handleGoHome = useCallback(() => {
     setPlaylist([]);
     setCurrentIndex(0);
@@ -449,54 +506,46 @@ function App() {
     setError(null);
   }, []);
 
+  // How far into the resume video the user got — drives the home-card progress bar.
+  const resumePercent = lastVideo && lastVideo.duration
+    ? Math.min(100, Math.max(0, ((loadVideoProgress(lastVideo.id) ?? 0) / lastVideo.duration) * 100))
+    : 0;
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+  const handleOpenUpdate = async () => {
+    if (!updateBanner) return;
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(updateBanner.url);
+    } catch { window.open(updateBanner.url, '_blank'); }
+  };
+
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
-      {/* Loading Overlay — Modern Circular Progress Ring */}
-      {isLoading && (
-        <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center backdrop-blur-md">
-          <div className="flex flex-col items-center gap-4">
-            {/* Circular Progress Ring */}
-            <div className="relative w-20 h-20">
-              <svg className="w-full h-full -rotate-90" viewBox="0 0 80 80">
-                {/* Background ring */}
-                <circle cx="40" cy="40" r="34" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="6" />
-                {/* Progress ring */}
-                <circle
-                  cx="40" cy="40" r="34" fill="none"
-                  stroke="url(#progressGradient)" strokeWidth="6"
-                  strokeLinecap="round"
-                  strokeDasharray={`${2 * Math.PI * 34}`}
-                  strokeDashoffset={loadingProgress >= 0
-                    ? `${2 * Math.PI * 34 * (1 - loadingProgress / 100)}`
-                    : `${2 * Math.PI * 34 * 0.75}`
-                  }
-                  className={loadingProgress < 0 ? 'animate-spin origin-center' : 'transition-all duration-300 ease-out'}
-                  style={loadingProgress < 0 ? { animationDuration: '1.2s' } : {}}
-                />
-                <defs>
-                  <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#ef4444" />
-                    <stop offset="100%" stopColor="#a855f7" />
-                  </linearGradient>
-                </defs>
-              </svg>
-              {/* Percentage text */}
-              {loadingProgress >= 0 && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-white font-bold text-lg tabular-nums">{loadingProgress}%</span>
-                </div>
-              )}
-            </div>
-            <p className="text-neutral-400 text-sm font-medium tracking-wide">
-              {loadingProgress >= 0 ? 'Processing videos...' : 'Loading...'}
-            </p>
+      {/* Update available banner — slim, dismissible, sits above everything */}
+      {updateBanner && (
+        <div className="relative z-[200] flex items-center justify-between gap-3 px-4 py-2 bg-gradient-to-r from-red-600/90 to-purple-700/90 backdrop-blur-sm text-white text-sm font-medium">
+          <div className="flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            <span>Update v{updateBanner.version} is available</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleOpenUpdate}
+              className="px-3 py-1 rounded-lg bg-white/20 hover:bg-white/30 transition-colors text-white font-semibold text-xs active:scale-95"
+            >
+              Download &amp; Install
+            </button>
+            <button onClick={() => setUpdateBanner(null)} className="p-1 hover:bg-white/20 rounded transition-colors" title="Dismiss">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
           </div>
         </div>
       )}
-
       {playlist.length > 0 ? (
         <div ref={playerWrapperRef} className="relative w-full h-full flex bg-black">
-          {/* Main Player Area */}
           <div className="relative flex-1 h-full bg-black">
             <VideoPlayer
               key={playlist[currentIndex].id}
@@ -505,9 +554,9 @@ function App() {
               subtitlesSrc={playlist[currentIndex].subtitleSrc}
               autoPlay={wasPlayingBeforeLibrary}
               onEnded={playNext}
-              onChangeVideo={() => openLibrary()}
-              onFileSelect={(files) => handleFileSelect(files)}
-              onPlayStateChange={(playing) => setWasPlayingBeforeLibrary(playing)}
+              onChangeVideo={openLibrary}
+              onFileSelect={handleOpenFilesViaDialog}
+              onPlayStateChange={playing => setWasPlayingBeforeLibrary(playing)}
               onNext={playNext}
               onPrev={playPrev}
               hasNext={currentIndex < playlist.length - 1 || isPlaylistLooping}
@@ -525,14 +574,13 @@ function App() {
             />
           </div>
 
-          {/* Library Modal */}
           {showLibrary && (
             <VideoLibrary
               videos={videoLibrary}
               onPlayVideo={playFromLibrary}
               onDeleteVideo={deleteFromLibrary}
               onClose={closeLibrary}
-              onAddVideos={handleAddToLibraryOnly}
+              onAddVideos={handleAddFilesViaDialog}
               onReorderVideos={handleReorderVideos}
               onPlayFolder={playFolder}
               onAddToFolder={handleAddToFolder}
@@ -541,143 +589,111 @@ function App() {
           )}
         </div>
       ) : (
-        /* Home Screen - Clean and Simple */
-        <div 
-          className={`flex-1 flex flex-col items-center justify-center p-4 sm:p-6 transition-colors duration-300 ${isDragging ? 'bg-neutral-800' : 'bg-neutral-900'}`}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-        >
-          <div className="w-full max-w-2xl">
+        /* Home Screen */
+        <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6 bg-neutral-900 overflow-y-auto custom-scrollbar">
+          <div className="w-full max-w-md py-8">
             {/* Logo & Title */}
-            <div className="text-center mb-8 sm:mb-12">
-              <div className="bg-neutral-800 w-16 h-16 sm:w-20 sm:h-20 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <FileVideo size={40} className="sm:w-12 sm:h-12 text-red-500" />
+            <div className="text-center mb-8 sm:mb-10">
+              <div className="relative w-16 h-16 sm:w-20 sm:h-20 mx-auto mb-5">
+                <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-red-500 to-purple-600 blur-xl opacity-40" />
+                <div className="relative w-full h-full rounded-2xl bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center shadow-xl shadow-red-500/20">
+                  <FileVideo size={34} className="sm:w-10 sm:h-10 text-white" strokeWidth={1.8} />
+                </div>
               </div>
-              <h1 className="text-4xl sm:text-5xl font-bold mb-2 bg-gradient-to-r from-red-500 to-purple-600 bg-clip-text text-transparent">
+              <h1 className="text-4xl sm:text-5xl font-bold tracking-tight bg-gradient-to-r from-red-500 via-pink-500 to-purple-500 bg-clip-text text-transparent">
                 PREV Player
               </h1>
-              <p className="text-neutral-400 text-sm sm:text-base">
-                Your personal video library
-              </p>
+              <p className="text-neutral-500 text-sm sm:text-base mt-2">Your personal video player</p>
             </div>
 
-            {/* Last Video Card - Compact */}
+            {/* Resume Watching */}
             {lastVideo && (
-              <div className="mb-6 sm:mb-8">
-                <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3">Resume Watching</p>
+              <div className="mb-6">
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 uppercase tracking-[0.15em] mb-2.5">
+                  <span className="w-1 h-1 rounded-full bg-red-500" /> Resume Watching
+                </p>
                 <button
                   onClick={() => playFromLibrary(lastVideo)}
-                  className="w-full group relative overflow-hidden rounded-lg bg-neutral-800 hover:bg-neutral-750 transition-all duration-300 hover:scale-105"
+                  className="w-full group flex items-center gap-4 p-3 rounded-2xl bg-neutral-800/60 ring-1 ring-white/5 hover:bg-neutral-800 hover:ring-red-500/30 transition-all duration-300"
                 >
-                  <div className="flex gap-3 sm:gap-4 p-3 sm:p-4">
-                    {/* Thumbnail */}
-                    <div className="relative w-16 h-16 sm:w-20 sm:h-20 flex-shrink-0 rounded overflow-hidden bg-neutral-700">
-                      {lastVideo.thumbnail ? (
-                        <img
-                          src={lastVideo.thumbnail}
-                          alt={lastVideo.name}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-neutral-800">
-                          <Play size={16} className="text-neutral-600 fill-neutral-600" />
-                        </div>
-                      )}
-                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-all" />
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 flex flex-col justify-center min-w-0">
-                      <h3 className="text-sm sm:text-base font-semibold text-white truncate group-hover:text-red-400 transition-colors text-left">
-                        {lastVideo.name}
-                      </h3>
-                      <p className="text-xs text-neutral-500 text-left">
-                        Click to continue
-                      </p>
-                    </div>
-
-                    {/* Play Icon */}
-                    <div className="flex items-center justify-center">
-                      <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-red-600 group-hover:bg-red-700 flex items-center justify-center transition-all transform group-hover:scale-110">
-                        <Play size={18} className="text-white fill-white ml-0.5" />
+                  <div className="relative w-28 h-[68px] flex-shrink-0 rounded-xl overflow-hidden bg-neutral-700">
+                    {lastVideo.thumbnail ? (
+                      <img src={lastVideo.thumbnail} alt={lastVideo.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-neutral-800">
+                        <FileVideo size={18} className="text-neutral-600" />
+                      </div>
+                    )}
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition-colors">
+                      <div className="w-9 h-9 rounded-full bg-white/95 flex items-center justify-center shadow-lg transition-transform group-hover:scale-110">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="#dc2626"><polygon points="6,4 20,12 6,20" /></svg>
                       </div>
                     </div>
+                    {resumePercent > 0 && (
+                      <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/50">
+                        <div className="h-full bg-red-500" style={{ width: `${resumePercent}%` }} />
+                      </div>
+                    )}
                   </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <h3 className="text-sm sm:text-base font-semibold text-white truncate group-hover:text-red-400 transition-colors">
+                      {lastVideo.name}
+                    </h3>
+                    <p className="text-xs text-neutral-500 mt-1">
+                      {resumePercent > 0 ? `${Math.round(resumePercent)}% watched · tap to continue` : 'Tap to continue'}
+                    </p>
+                  </div>
+                  <ChevronRight size={20} className="text-neutral-600 group-hover:text-red-400 group-hover:translate-x-0.5 transition-all flex-shrink-0" />
                 </button>
               </div>
             )}
 
-            {/* Action Buttons */}
-            <div className="space-y-3">
-              {/* Browse Videos */}
-              <label className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-red-600 rounded-lg hover:bg-red-700 hover:shadow-lg hover:shadow-red-500/30 cursor-pointer transition-all active:scale-95">
-                <Upload size={20} className="sm:w-6 sm:h-6" />
-                <span>Browse & Add Videos</span>
-                <input 
-                  type="file" 
-                  multiple
-                  accept="video/*" 
-                  onChange={handleInputChange}
-                  className="hidden" 
-                />
-              </label>
+            {/* Primary action */}
+            <button
+              onClick={handleOpenFilesViaDialog}
+              className="flex items-center justify-center gap-2.5 w-full px-6 py-4 rounded-2xl font-semibold text-sm sm:text-base text-white bg-red-600 hover:bg-red-500 shadow-lg shadow-red-600/25 hover:shadow-red-500/40 transition-all active:scale-[0.98]"
+            >
+              <Upload size={20} />
+              <span>Open Videos</span>
+            </button>
 
-              {/* Import Folder — Fix #1 */}
-              <input
-                ref={homeFolderInputRef}
-                type="file"
-                // @ts-ignore webkitdirectory is non-standard
-                webkitdirectory=""
-                directory=""
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) handleAddFolderFromPC(e.target.files);
-                  e.target.value = '';
-                }}
-              />
+            {/* Secondary actions */}
+            <div className={`grid gap-3 mt-3 ${videoLibrary.length > 0 ? 'grid-cols-2' : 'grid-cols-1'}`}>
               <button
-                onClick={() => homeFolderInputRef.current?.click()}
-                className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-white bg-neutral-800 hover:bg-neutral-700 hover:shadow-lg rounded-lg cursor-pointer transition-all active:scale-95"
+                onClick={handleAddFolderFromPC}
+                className="flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl font-medium text-sm text-neutral-200 bg-neutral-800/80 hover:bg-neutral-700 ring-1 ring-white/5 transition-all active:scale-[0.98]"
               >
-                <FolderPlus size={20} className="sm:w-6 sm:h-6" />
+                <FolderPlus size={18} />
                 <span>Import Folder</span>
               </button>
 
-              {/* View Library */}
               {videoLibrary.length > 0 && (
                 <button
                   onClick={openLibrary}
-                  className="group relative flex items-center justify-center gap-2 w-full px-6 sm:px-8 py-3 sm:py-4 font-semibold text-sm sm:text-base text-neutral-300 bg-neutral-800/60 hover:bg-neutral-700 rounded-lg transition-all active:scale-95 border border-neutral-700/50"
+                  className="flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl font-medium text-sm text-neutral-200 bg-neutral-800/80 hover:bg-neutral-700 ring-1 ring-white/5 transition-all active:scale-[0.98]"
                 >
-                  <Library size={20} className="sm:w-6 sm:h-6" />
+                  <Library size={18} />
                   <span>Library ({videoLibrary.length})</span>
                 </button>
               )}
             </div>
 
-            {/* Drop Zone */}
-            {!isDragging && (
-              <div className="mt-8 sm:mt-12 pt-8 border-t border-neutral-800">
-                <p className="text-center text-neutral-500 text-sm mb-4">
-                  Or drag and drop videos here
-                </p>
-                <div className={`border-2 border-dashed rounded-lg p-6 sm:p-8 text-center transition-all ${isDragging ? 'border-red-500 bg-red-500/10' : 'border-neutral-700'}`}>
-                  <p className="text-neutral-400 text-sm">
-                    All your videos will be saved to the library
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Error */}
             {error && (
-              <div className="mt-6 flex items-center text-red-400 bg-red-400/10 px-4 py-3 rounded-lg animate-pulse text-sm">
+              <div className="mt-5 flex items-center text-red-400 bg-red-400/10 px-4 py-3 rounded-xl text-sm">
                 <AlertCircle size={16} className="mr-2 flex-shrink-0" />
                 <span>{error}</span>
               </div>
             )}
+
+            {/* Footer hint */}
+            <p className="mt-8 flex items-center justify-center gap-2 text-center text-neutral-600 text-xs">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              Drag &amp; drop videos anywhere to play
+            </p>
           </div>
         </div>
       )}
@@ -689,12 +705,28 @@ function App() {
           onPlayVideo={playFromLibrary}
           onDeleteVideo={deleteFromLibrary}
           onClose={closeLibrary}
-          onAddVideos={handleAddToLibraryOnly}
+          onAddVideos={handleAddFilesViaDialog}
           onReorderVideos={handleReorderVideos}
           onPlayFolder={playFolder}
           onAddToFolder={handleAddToFolder}
           onAddFolderFromPC={handleAddFolderFromPC}
         />
+      )}
+
+      {/* Drag-and-drop overlay — only while files are actively dragged over the
+          window (ChatGPT-style). Covers both the home screen and the player. */}
+      {isDragging && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 sm:p-10 bg-neutral-950/80 backdrop-blur-sm pointer-events-none animate-[fadeIn_0.15s_ease]">
+          <div className="flex flex-col items-center justify-center gap-5 w-full max-w-2xl h-full max-h-[55vh] rounded-3xl border-2 border-dashed border-red-500/70 bg-red-500/[0.06] text-center px-6">
+            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center shadow-2xl shadow-red-500/30 animate-bounce-slow">
+              <Upload size={36} className="text-white" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-white">Drop to play</p>
+              <p className="text-neutral-400 text-sm mt-1.5">Release your video files anywhere</p>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

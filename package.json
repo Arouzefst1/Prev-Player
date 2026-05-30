@@ -3,62 +3,32 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "main": "electron/main.cjs",
-  "homepage": "./",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "electron": "wait-on http://localhost:3001 && electron .",
-    "electron-dev": "concurrently \"npm run dev\" \"npm run electron\"",
-    "electron-build": "npm run build && electron-builder",
-    "electron-build-win": "npm run build && electron-builder --win --publish never"
+    "vite-dev": "vite",
+    "vite-build": "vite build",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "preview": "vite preview"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-fs": "^2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "lucide-react": "^0.555.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@react-native-community/cli-platform-android": "^20.0.2",
-    "@react-native/gradle-plugin": "^0.82.1",
+    "@tauri-apps/cli": "^2",
     "@types/node": "^22.19.15",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.0",
-    "baseline-browser-mapping": "^2.10.29",
-    "concurrently": "^8.2.2",
-    "electron": "^41.1.0",
-    "electron-builder": "^26.8.1",
-    "electron-is-dev": "^3.0.1",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0",
-    "wait-on": "^8.0.5"
-  },
-  "build": {
-    "appId": "com.prev-player.app",
-    "productName": "PREV Player",
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "node_modules/**/*"
-    ],
-    "directories": {
-      "buildResources": "assets"
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "PREV Player"
-    }
+    "vite": "^6.2.0"
   }
 }

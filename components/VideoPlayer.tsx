@@ -1,5 +1,12 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Upload, FolderOpen, AlertCircle, X, Play } from 'lucide-react';
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
 import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress } from '../utils';
@@ -17,7 +24,7 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
   onEnded?: () => void;
   onChangeVideo?: () => void;
-  onFileSelect?: (files: FileList) => void;
+  onFileSelect?: () => void;
   onPlayStateChange?: (playing: boolean) => void;
   // Playlist navigation
   onNext?: () => void;
@@ -42,6 +49,102 @@ interface VideoPlayerProps {
   onGoHome?: () => void;
 }
 
+// ============================================================
+// QueuePanel — sortable queue using @dnd-kit (pointer events,
+// unaffected by Tauri's WebView2 drag-drop interception)
+// ============================================================
+
+const SortableQueueItem: React.FC<{
+  item: { id: string; name: string; thumbnail?: string };
+  index: number;
+  currentIndex: number;
+  onJumpTo: (i: number) => void;
+}> = ({ item, index, currentIndex, onJumpTo }) => {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging, isSorting, activeIndex, overIndex } = useSortable({ id: item.id });
+  const isCurrent = index === currentIndex;
+  // Spotify-style drop indicator: keep the list static and show a red line at
+  // the edge of the row the dragged item will drop into.
+  const showDropLine = isSorting && !isDragging && index === overIndex && activeIndex !== -1 && activeIndex !== overIndex;
+  const dropLineAtBottom = activeIndex < overIndex;
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: isDragging ? CSS.Transform.toString(transform) : undefined,
+        transition,
+        opacity: isDragging ? 0.4 : 1,
+        position: 'relative',
+        zIndex: isDragging ? 20 : undefined,
+      }}
+      onClick={() => onJumpTo(index)}
+      className={`w-full flex items-center gap-2 p-3 cursor-pointer transition-all duration-200 group ${isCurrent ? 'bg-red-600/15 border-l-2 border-l-red-500' : 'hover:bg-neutral-800/80 border-l-2 border-l-transparent'}`}
+    >
+      {showDropLine && (
+        <span className={`pointer-events-none absolute left-2 right-2 z-30 h-[3px] rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.9)] ${dropLineAtBottom ? 'bottom-0' : 'top-0'}`}>
+          <span className="absolute -left-1 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-red-500" />
+        </span>
+      )}
+      <div {...attributes} {...listeners} onClick={(e) => e.stopPropagation()} className="cursor-grab active:cursor-grabbing flex flex-col gap-[2px] p-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+        <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
+        <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
+        <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
+      </div>
+      <span className={`text-xs font-mono w-5 text-right flex-shrink-0 ${isCurrent ? 'text-red-400 font-bold' : 'text-neutral-600'}`}>
+        {isCurrent ? '▶' : index + 1}
+      </span>
+      {item.thumbnail && (
+        <div className="w-12 h-8 rounded overflow-hidden flex-shrink-0 bg-neutral-800">
+          <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+        </div>
+      )}
+      <span className={`text-sm truncate flex-1 ${isCurrent ? 'text-red-400 font-semibold' : 'text-neutral-300 group-hover:text-white'}`}>
+        {item.name}
+      </span>
+    </div>
+  );
+};
+
+const QueuePanel: React.FC<{
+  playlist: { id: string; name: string; thumbnail?: string }[];
+  currentIndex: number;
+  onJumpTo: (i: number) => void;
+  onReorder: (items: { id: string; name: string; thumbnail?: string }[]) => void;
+  onClose: () => void;
+}> = ({ playlist, currentIndex, onJumpTo, onReorder, onClose }) => {
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  return (
+    <div className="absolute top-0 right-0 bottom-0 w-80 max-w-[85%] bg-black/95 backdrop-blur-md z-50 flex flex-col border-l border-neutral-800 animate-[slideInRight_0.25s_ease]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
+        <div>
+          <h3 className="text-sm font-bold text-white">Queue</h3>
+          <p className="text-xs text-neutral-500">{playlist.length} videos</p>
+        </div>
+        <button onClick={onClose} className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
+          <X size={18} className="text-neutral-400" />
+        </button>
+      </div>
+      <div className="flex-1 overflow-auto custom-scrollbar">
+        <DndContext sensors={sensors} collisionDetection={closestCenter}
+          onDragEnd={(event: DragEndEvent) => {
+            const { active, over } = event;
+            if (!over || active.id === over.id) return;
+            const oldIdx = playlist.findIndex(p => p.id === active.id);
+            const newIdx = playlist.findIndex(p => p.id === over.id);
+            if (oldIdx >= 0 && newIdx >= 0) onReorder(arrayMove(playlist, oldIdx, newIdx));
+          }}>
+          <SortableContext items={playlist.map(p => p.id)} strategy={verticalListSortingStrategy}>
+            {playlist.map((item, i) => (
+              <SortableQueueItem key={item.id} item={item} index={i} currentIndex={currentIndex} onJumpTo={onJumpTo} />
+            ))}
+          </SortableContext>
+        </DndContext>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
   src, videoId, subtitlesSrc, autoPlay = false, onEnded, onChangeVideo, onFileSelect, onPlayStateChange,
   onNext, onPrev, hasNext, hasPrev,
@@ -53,12 +156,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onVideoRef,
   onGoHome,
 }) => {
-  const wasFullscreenBeforeDialogRef = useRef<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastClickMsRef = useRef(0);
 
   const spaceHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSpaceHeldRef = useRef<boolean>(false);
@@ -353,27 +455,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [startFullscreen, fullscreenContainerRef]);
 
-  // Open file dialog and restore fullscreen afterwards
+  // Delegate file opening to App.tsx (which handles the Tauri dialog + fullscreen restore)
   const handleOpenFileDialog = useCallback(() => {
-    if (!fileInputRef.current) return;
-    wasFullscreenBeforeDialogRef.current = !!document.fullscreenElement;
-    fileInputRef.current.click();
-
-    // Handle dialog cancel (no file selected) — restore fullscreen when window regains focus
-    if (wasFullscreenBeforeDialogRef.current) {
-      const restoreOnFocus = () => {
-        window.removeEventListener('focus', restoreOnFocus);
-        setTimeout(() => {
-          if (wasFullscreenBeforeDialogRef.current && !document.fullscreenElement) {
-            const el = fullscreenContainerRef?.current || containerRef.current;
-            el?.requestFullscreen().catch(() => {});
-          }
-          wasFullscreenBeforeDialogRef.current = false;
-        }, 200);
-      };
-      window.addEventListener('focus', restoreOnFocus);
-    }
-  }, [fullscreenContainerRef]);
+    onFileSelect?.();
+  }, [onFileSelect]);
 
   const toggleLoop = useCallback(() => {
     if (!videoRef.current) return;
@@ -383,6 +468,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [isLooping]);
 
   // --- Picture-in-Picture (native, borderless, auto-sized to video) ---
+  const wasFullscreenBeforePipRef = useRef(false);
+
   const togglePip = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -391,9 +478,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (document.pictureInPictureElement) {
         await document.exitPictureInPicture();
       } else if (document.pictureInPictureEnabled) {
-        // The native Video PiP API auto-sizes the window to match the video's
-        // actual dimensions — portrait/shorts get a tall narrow window,
-        // landscape gets a wide window. No borders, no title bar, just video.
+        // Remember fullscreen state before PiP (PiP exits fullscreen)
+        wasFullscreenBeforePipRef.current = !!document.fullscreenElement;
         await video.requestPictureInPicture();
       }
     } catch (err) {
@@ -401,19 +487,42 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
-  // Sync PiP state from Video PiP API events
+  // Sync PiP state; on leave restore the Tauri window and re-enter fullscreen if applicable
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
     const onEnterPip = () => setIsPip(true);
-    const onLeavePip = () => setIsPip(false);
+
+    const onLeavePip = async () => {
+      setIsPip(false);
+      const restoreFullscreen = wasFullscreenBeforePipRef.current;
+      wasFullscreenBeforePipRef.current = false;
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        await win.show();
+        await win.unminimize();
+        await win.setFocus();
+        // setFullscreen via Tauri API — doesn't require a user-gesture unlike requestFullscreen()
+        if (restoreFullscreen) await win.setFullscreen(true);
+      } catch {
+        // Fallback for non-Tauri environments
+        if (restoreFullscreen) {
+          setTimeout(() => {
+            (fullscreenContainerRef?.current || containerRef.current)?.requestFullscreen().catch(() => {});
+          }, 200);
+        }
+      }
+    };
+
     video.addEventListener('enterpictureinpicture', onEnterPip);
     video.addEventListener('leavepictureinpicture', onLeavePip);
     return () => {
       video.removeEventListener('enterpictureinpicture', onEnterPip);
       video.removeEventListener('leavepictureinpicture', onLeavePip);
     };
-  }, []);
+  }, [fullscreenContainerRef]);
 
   // Mobile touch hold for 2x speed
   const handleTouchStart = useCallback(() => {
@@ -817,28 +926,29 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onLoadedMetadata={() => {
           setDuration(videoRef.current?.duration || 0);
         }}
-        onClick={(e) => {
-          // Clear any pending single-click timer
+        onClick={() => {
+          // Timestamp-based double-click detection — e.detail is unreliable in
+          // Tauri's WebView2 (always returns 1), so we measure elapsed time instead.
+          const now = Date.now();
+          const elapsed = now - lastClickMsRef.current;
+
           if (singleClickTimerRef.current) {
             clearTimeout(singleClickTimerRef.current);
             singleClickTimerRef.current = null;
           }
-          // e.detail counts rapid clicks: 1 = single, 2+ = double
-          if (e.detail === 1) {
+
+          if (elapsed < 300) {
+            // Two clicks within 300 ms → double-click: fullscreen only
+            lastClickMsRef.current = 0; // reset so a triple-click doesn't re-trigger
+            toggleFullscreen();
+          } else {
+            lastClickMsRef.current = now;
+            // Defer so the 2nd click of a double-click can still cancel this
             singleClickTimerRef.current = setTimeout(() => {
-              togglePlay();
               singleClickTimerRef.current = null;
-            }, 200);
+              togglePlay();
+            }, 300);
           }
-        }}
-        onDoubleClick={(e) => {
-          // Cancel the pending single-click play toggle
-          if (singleClickTimerRef.current) {
-            clearTimeout(singleClickTimerRef.current);
-            singleClickTimerRef.current = null;
-          }
-          e.preventDefault();
-          toggleFullscreen();
         }}
         onTouchStart={() => {
           handleTouchStart();
@@ -871,29 +981,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       )}
-
-      {/* Hidden file input for selecting new videos */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept="video/*"
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files && onFileSelect) {
-            onFileSelect(e.target.files);
-          }
-          // Reset so the same file can be selected again
-          e.target.value = '';
-          // Restore fullscreen if it was active before the dialog opened
-          if (wasFullscreenBeforeDialogRef.current && containerRef.current && !document.fullscreenElement) {
-            setTimeout(() => {
-              containerRef.current?.requestFullscreen().catch(() => {});
-            }, 100);
-          }
-          wasFullscreenBeforeDialogRef.current = false;
-        }}
-      />
 
       {/* Open File Button - Top Left (shows/hides with controls) */}
       {onFileSelect && (
@@ -951,103 +1038,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       />
 
       {/* Queue Panel */}
-      {showQueue && playlistInfo && playlistInfo.length > 1 && (() => {
-        // Queue drag state (inline to keep it self-contained)
-        const handleQueueDragStart = (e: React.DragEvent, idx: number) => {
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', String(idx));
-          (e.currentTarget as HTMLElement).style.opacity = '0.4';
-        };
-        const handleQueueDragEnd = (e: React.DragEvent) => {
-          (e.currentTarget as HTMLElement).style.opacity = '1';
-        };
-        const handleQueueDrop = (e: React.DragEvent, targetIdx: number) => {
-          e.preventDefault();
-          const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
-          if (isNaN(fromIdx) || fromIdx === targetIdx || !playlistInfo) return;
-          const newList = [...playlistInfo];
-          const [moved] = newList.splice(fromIdx, 1);
-          newList.splice(targetIdx, 0, moved);
-          onReorderPlaylist?.(newList);
-        };
-
-        return (
-          <div className={`absolute top-0 right-0 bottom-0 w-80 max-w-[85%] bg-black/95 backdrop-blur-md z-50 flex flex-col border-l border-neutral-800 animate-[slideInRight_0.25s_ease]`}>
-            {/* Queue Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-              <div>
-                <h3 className="text-sm font-bold text-white">Queue</h3>
-                <p className="text-xs text-neutral-500">{playlistInfo.length} videos</p>
-              </div>
-              <button onClick={() => setShowQueue(false)} className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
-                <X size={18} className="text-neutral-400" />
-              </button>
-            </div>
-
-            {/* Queue List — Draggable with auto-scroll (Fix #4) */}
-            <div className="flex-1 overflow-auto custom-scrollbar" ref={(el) => { (window as any).__queueScrollContainer = el; }}>
-              {playlistInfo.map((item, i) => (
-                <div
-                  key={item.id + '-' + i}
-                  draggable
-                  onDragStart={(e) => handleQueueDragStart(e, i)}
-                  onDragEnd={handleQueueDragEnd}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = 'move';
-                    // Auto-scroll when near edges (Fix #4)
-                    const container = (window as any).__queueScrollContainer as HTMLElement;
-                    if (container) {
-                      const rect = container.getBoundingClientRect();
-                      const edgeZone = 60;
-                      if (e.clientY - rect.top < edgeZone) {
-                        container.scrollBy({ top: -12, behavior: 'auto' });
-                      } else if (rect.bottom - e.clientY < edgeZone) {
-                        container.scrollBy({ top: 12, behavior: 'auto' });
-                      }
-                    }
-                  }}
-                  onDrop={(e) => handleQueueDrop(e, i)}
-                  onClick={() => onJumpTo?.(i)}
-                  className={`w-full flex items-center gap-2 p-3 text-left transition-all duration-200 group cursor-pointer ${
-                    i === currentPlaylistIndex
-                      ? 'bg-red-600/15 border-l-2 border-l-red-500'
-                      : 'hover:bg-neutral-800/80 border-l-2 border-l-transparent'
-                  }`}
-                >
-                  {/* Drag Handle */}
-                  <div className="cursor-grab active:cursor-grabbing flex flex-col gap-[2px] p-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" title="Drag to reorder">
-                    <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
-                    <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
-                    <span className="block w-3 h-[2px] bg-neutral-500 rounded" />
-                  </div>
-
-                  {/* Index / Now Playing */}
-                  <span className={`text-xs font-mono w-5 text-right flex-shrink-0 ${
-                    i === currentPlaylistIndex ? 'text-red-400 font-bold' : 'text-neutral-600'
-                  }`}>
-                    {i === currentPlaylistIndex ? '\u25b6' : i + 1}
-                  </span>
-
-                  {/* Thumbnail */}
-                  {item.thumbnail && (
-                    <div className="w-12 h-8 rounded overflow-hidden flex-shrink-0 bg-neutral-800">
-                      <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
-                    </div>
-                  )}
-
-                  {/* Name */}
-                  <span className={`text-sm truncate flex-1 ${
-                    i === currentPlaylistIndex ? 'text-red-400 font-semibold' : 'text-neutral-300 group-hover:text-white'
-                  }`}>
-                    {item.name}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })()}
+      {showQueue && playlistInfo && playlistInfo.length > 1 && (
+        <QueuePanel
+          playlist={playlistInfo}
+          currentIndex={currentPlaylistIndex ?? 0}
+          onJumpTo={onJumpTo ?? (() => {})}
+          onReorder={onReorderPlaylist ?? (() => {})}
+          onClose={() => setShowQueue(false)}
+        />
+      )}
 
       {/* Library Button (visible when controls are shown, including fullscreen) */}
       {showLibraryButton && onOpenLibrary && (
