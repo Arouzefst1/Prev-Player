@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
@@ -524,23 +524,41 @@ function App() {
 
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
-      {/* Update available banner — slim, dismissible, sits above everything */}
+      {/* Update dialog — modal, shown once when a newer version is found */}
       {updateBanner && (
-        <div className="relative z-[200] flex items-center justify-between gap-3 px-4 py-2 bg-gradient-to-r from-red-600/90 to-purple-700/90 backdrop-blur-sm text-white text-sm font-medium">
-          <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-            <span>Update v{updateBanner.version} is available</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleOpenUpdate}
-              className="px-3 py-1 rounded-lg bg-white/20 hover:bg-white/30 transition-colors text-white font-semibold text-xs active:scale-95"
-            >
-              Download &amp; Install
-            </button>
-            <button onClick={() => setUpdateBanner(null)} className="p-1 hover:bg-white/20 rounded transition-colors" title="Dismiss">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
+        <div className="fixed inset-0 z-[300] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 animate-[fadeIn_0.2s_ease]">
+          <div
+            className="border border-neutral-700/60 rounded-2xl p-6 w-full max-w-sm shadow-2xl shadow-black/60 animate-[fadeIn_0.25s_ease]"
+            style={{ background: 'rgb(24,24,27)' }}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center shadow-lg shadow-red-500/20 flex-shrink-0">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 19V5M5 12l7-7 7 7"/>
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-bold text-white text-base">Update Available</h3>
+                <p className="text-sm text-neutral-400">PREV Player v{updateBanner.version}</p>
+              </div>
+            </div>
+            <p className="text-neutral-300 text-sm leading-relaxed mb-6">
+              A new version of PREV Player is ready. Update now to get the latest features and improvements.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setUpdateBanner(null)}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-neutral-700 hover:bg-neutral-600 text-sm font-medium text-neutral-200 transition-colors active:scale-[0.97]"
+              >
+                Later
+              </button>
+              <button
+                onClick={handleOpenUpdate}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-sm font-bold text-white transition-all shadow-lg shadow-red-600/20 active:scale-[0.97]"
+              >
+                Update Now
+              </button>
+            </div>
           </div>
         </div>
       )}

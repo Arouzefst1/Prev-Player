@@ -22,7 +22,7 @@
     ],
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller"
+        "type": "embedBootstrapper"
       }
     }
   },
