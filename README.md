@@ -1,247 +1,97 @@
-# 🎬 PREV Player
+# PREV Player
 
-**A powerful, responsive video player that works everywhere** - Android, Windows, macOS, Linux, and iOS. **Installs as a native app with offline support and auto-updates!**
-
----
-
-## ✨ Features
-
-✅ **Installable PWA** - Install on any device like a native app  
-✅ **Offline Support** - Watch videos without internet  
-✅ **Auto-Update** - Automatically updates when code changes  
-✅ **Responsive Design** - Works on mobile, tablet, desktop, foldable phones  
-✅ **Advanced Controls** - Keyboard shortcuts, touch gestures, playlists  
-✅ **Subtitle Support** - VTT and SRT subtitles  
-✅ **Playback Speed** - 0.25x to 2x speed control  
-✅ **Full HD Quality** - Supports all video formats  
+A fast, lightweight desktop video player for Windows built with Tauri + React.  
+Videos play **directly from their original location** — nothing is ever copied or duplicated.
 
 ---
 
-## 🚀 Quick Start
+## Download
 
-### Run Locally
+**[Download latest release →](https://github.com/Arouzefst1/Prev-Player/releases/latest)**
 
-**Prerequisites:** Node.js v16+
-
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-2. **Run the dev server:**
-   ```bash
-   npm run dev
-   ```
-
-3. **Open in browser:**
-   - Local: http://localhost:3001
-   - Network: http://YOUR_IP:3001
+> The installer is in the **Releases** section (right sidebar on GitHub), not inside the source code folders.  
+> The source code is the code that builds the app — the actual installer (`.exe`) is attached to each release.
 
 ---
 
-## 📱 Install as App
+## Installation
 
-### On Android
-1. Open in Chrome → Menu (⋮) → "Install app" ✅
+1. Go to [Releases](https://github.com/Arouzefst1/Prev-Player/releases/latest)
+2. Download `PREV Player_x.x.x_x64-setup.exe`
+3. Run it and follow the installer
+4. Done — video files (`.mp4`, `.mkv`, `.avi`, etc.) will automatically open in PREV Player when double-clicked
 
-### On Windows/Desktop
-1. Open in Chrome/Edge → Click install icon → Done! ✅
+> **Windows SmartScreen warning?**  
+> Click **"More info"** → **"Run anyway"**. This appears because the app isn't signed with a paid certificate yet. It contains no malware.
 
-### On macOS
-1. Chrome: Menu → "Install app"
-2. Safari: File → "Add to Dock" ✅
-
-### On iOS/iPad
-1. Safari → Share → "Add to Home Screen" ✅
-
-**That's it!** App runs full-screen like a native app.
+**Requires:** Windows 10 or Windows 11 (64-bit)  
+WebView2 is bundled — no extra software needed.
 
 ---
 
-## 🎮 Controls
+## Features
 
-### Keyboard (Desktop)
-| Key | Action |
-|-----|--------|
-| **K** | Play/Pause |
-| **Space** | Play/Pause or 2x Speed (hold) |
-| **L** | Forward 10s |
-| **J** | Rewind 10s |
-| **F** | Fullscreen |
-| **M** | Mute |
-| **C** | Toggle Subtitles |
-| **0-9** | Jump to 0-90% |
-| **< / >** | Speed Down/Up |
+- **Zero double storage** — library stores file paths only, not copies of your videos
+- **Video library** — add videos and folders, with thumbnails and duration
+- **Folder playlists** — import a folder; clicking any video loads the whole folder as a playlist
+- **Drag-to-reorder** — reorder library and queue with Spotify-style drop indicators
+- **File associations** — double-click any supported video file to open it directly
+- **Single instance** — opening a file while the app is running adds it to the queue
+- **Resume watching** — remembers where you left off for each video
+- **Subtitles** — VTT and SRT support
+- **Playback speed** — 0.25× to 2×
+- **Keyboard shortcuts** — Space/K (play/pause), J/L (skip), F (fullscreen), M (mute), C (subtitles)
+- **Picture-in-Picture** — native PiP with fullscreen restore on return
+- **Queue panel** — drag-to-reorder the current playlist while playing
+- **Auto-updater** — notified on launch when a new version is available
 
-### Touch (Mobile/Tablet)
-| Gesture | Action |
-|---------|--------|
-| **Tap** | Play/Pause |
-| **Double-tap** | Fullscreen |
-| **Hold 500ms** | 2x Speed |
-| **Tap time** | Toggle remaining time |
+**Supported formats:** MP4, MKV, AVI, MOV, WMV, WebM, FLV, M4V, OGV, OGG, 3GP, 3G2, TS, MTS, M2TS, VOB, MPG, MPEG
 
 ---
 
-## 🔄 Auto-Update Feature
+## Building from source
 
-Your app automatically checks for updates every **5 minutes** when online:
-
-1. You update code → Dev server reloads
-2. App detects change → Auto-reloads
-3. Users see latest version instantly
-
-**No manual refresh needed!** Just deploy code and it updates everywhere.
-
----
-
-## 📂 Project Structure
-
-```
-Video-player/
-├── components/
-│   ├── VideoPlayer.tsx      # Main player component
-│   ├── PlayerControls.tsx    # Control bar
-│   └── ActionOverlay.tsx     # Overlay animations
-├── public/
-│   ├── manifest.json        # PWA manifest
-│   ├── service-worker.js    # Offline & update handler
-│   └── icons/               # App icons (SVG)
-├── App.tsx                  # Main app component
-├── index.html               # With PWA meta tags
-└── README.md               # This file
-```
-
----
-
-## 🔒 PWA Security
-
-✅ **HTTPS ready** - Secure with HTTPS in production  
-✅ **No tracking** - No analytics or telemetry  
-✅ **No data sharing** - Everything stays local  
-✅ **Offline by default** - Works without internet  
-✅ **Permission-based** - Only asks what's needed  
-
----
-
-## 📚 Documentation
-
-- **[INSTALLATION.md](INSTALLATION.md)** - Complete setup & installation guide ⭐ START HERE
-- **[QUICK_START.md](QUICK_START.md)** - Quick reference guide
-- **[PWA_SETUP.md](PWA_SETUP.md)** - Detailed device-specific installation
-- **[PWA_COMPLETE.md](PWA_COMPLETE.md)** - Full technical documentation
-
----
-
-## 🛠️ Build for Production
+**Prerequisites**
+- [Node.js 20+](https://nodejs.org)
+- [Rust + cargo](https://rustup.rs)
+- [VS 2022 Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with the **Desktop development with C++** workload
 
 ```bash
-npm run build
-```
+# Clone the repo
+git clone https://github.com/Arouzefst1/Prev-Player.git
+cd Prev-Player
 
-Deploys to `/dist` folder. Serve with:
-- **Nginx/Apache**: Standard web server
-- **Node.js**: Express or similar
-- **Vercel/Netlify**: Zero-config deployment
+# Install JS dependencies
+npm install
 
-**Important**: Must be served over HTTPS (except localhost) for PWA.
-
----
-
-## 🌐 Browser Support
-
-| Browser | Desktop | Mobile | Offline | PWA |
-|---------|---------|--------|---------|-----|
-| Chrome | ✅ | ✅ | ✅ | ✅ |
-| Edge | ✅ | ✅ | ✅ | ✅ |
-| Firefox | ✅ | ✅ | ✅ | ✅ |
-| Safari | ✅ | ✅ | ✅ | ⚠️ |
-
-*Safari: Offline works, but PWA install limited on iOS*
-
----
-
-## 🎯 Use Cases
-
-🎬 **Personal Media Library** - Store and play your videos locally  
-📱 **Mobile App** - Install on phone like YouTube  
-💼 **Enterprise** - Deploy internally, no internet needed  
-🎓 **Education** - Offline educational videos  
-🌍 **Offline Region** - Works without internet  
-
----
-
-## 🚀 Deployment Options
-
-### Local Network
-```bash
+# Dev mode (hot-reload)
 npm run dev
-# Then visit: http://YOUR_IP:3001 on other devices
+
+# Build installer
+npm run build
+# Output: src-tauri/target/release/bundle/nsis/PREV Player_x.x.x_x64-setup.exe
 ```
 
-### Docker
-```bash
-docker build -t zenith-player .
-docker run -p 3001:3001 zenith-player
-```
-
-### Cloud Hosting
-- **Vercel**: `vercel deploy`
-- **Netlify**: `netlify deploy`
-- **GitHub Pages**: Static hosting
-- **Your Server**: Copy `/dist` to web root
+> `src-tauri/target/` is excluded from git (it's multi-GB compiled output).  
+> Run `npm run build` to generate it locally.
 
 ---
 
-## 📊 Performance
+## Publishing a new release
 
-- **App Size**: 2-3 MB
-- **Cache Size**: ~50+ MB auto-managed
-- **Load Time**: < 2 seconds
-- **Offline**: Instant launch
-- **Streaming**: Up to 4K quality
-
----
-
-## 🐛 Troubleshooting
-
-**App won't install?**
-- Use Chrome/Edge browser
-- Disable ad-blockers
-- Clear browser cache
-- Try incognito mode
-
-**Not updating?**
-- Close and reopen app
-- Check internet connection
-- Pull to refresh manually
-
-**Can't play offline?**
-- Load video online first (gets cached)
-- Ensure enough storage space
-- Check file format compatibility
-
-See **[PWA_SETUP.md](PWA_SETUP.md)** for more help.
+1. Bump `version` in `src-tauri/tauri.conf.json` (e.g. `"1.0.1"`)
+2. Run `npm run build`
+3. Create a GitHub release with tag `v1.0.1` and attach the new setup.exe
+4. All installed copies will show the update dialog on their next launch
 
 ---
 
-## 📝 License
+## Tech stack
 
-MIT License - Use freely in personal and commercial projects.
-
----
-
-## 🤝 Contributing
-
-Feel free to submit issues and enhancement requests!
-
----
-
-## 🎉 Ready to Use!
-
-1. Run `npm install && npm run dev`
-2. Open http://localhost:3001
-3. Click install button
-4. Enjoy your new app! 🚀
-
-**Questions?** See the documentation files above.
+| Layer | Technology |
+|---|---|
+| UI | React 19 + TypeScript + Tailwind CSS |
+| Desktop shell | Tauri v2 (Rust + Windows WebView2) |
+| Drag-and-drop | @dnd-kit/sortable |
+| Local storage | IndexedDB (metadata only) + localStorage |
+| Icons | Lucide React |

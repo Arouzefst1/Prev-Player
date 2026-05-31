@@ -19,7 +19,7 @@ pub fn run() {
         .filter(|a| !a.starts_with('-'))
         .collect();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(InitialFiles(Mutex::new(initial_files)))
         // Single-instance: if a second instance is opened (e.g. user opens another video
         // file), forward the new file paths to the already-running window.
@@ -40,7 +40,16 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    // Auto-updater (desktop only). The frontend drives check() / downloadAndInstall(),
+    // then relaunches the app via tauri-plugin-process.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![get_initial_files])
         .run(tauri::generate_context!())
         .expect("error while running PREV Player");

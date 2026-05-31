@@ -65,9 +65,15 @@ const ActionOverlay: React.FC<ActionOverlayProps> = ({ overlayState }) => {
  * opacity:0 thanks to `animation-fill-mode: forwards`. No timers needed.
  */
 const SkipOverlayInner: React.FC<{ action: NonNullable<OverlayState['action']>; value?: string | number }> = ({ action, value }) => {
+  // Skip indicators are anchored to fixed points just left/right of the window
+  // centre (40% / 60%), NOT to the window edges. This keeps them on-content for
+  // any aspect ratio — including 9:16 shorts, whose video strip is too narrow for
+  // edge-anchored overlays (those would land in the black pillarbox bars).
+  // The centering transform lives on the outer div; the inner badge owns the
+  // `animate-ping-once` scale animation so the two transforms don't clash.
   if (action === 'forward-5' || action === 'forward-10') {
     return (
-      <div className="absolute inset-0 flex items-center justify-end pointer-events-none z-30 pr-[15%]">
+      <div className="absolute top-1/2 left-[60%] -translate-x-1/2 -translate-y-1/2 pointer-events-none z-30">
         <div className="bg-black/40 backdrop-blur-sm p-4 sm:p-6 rounded-full animate-ping-once flex flex-col items-center justify-center text-white">
           <FastForward size={28} className="sm:w-10 sm:h-10" fill="currentColor" />
           <span className="text-xs font-bold mt-0.5 sm:mt-1">{action === 'forward-5' ? '+5s' : '+10s'}</span>
@@ -78,7 +84,7 @@ const SkipOverlayInner: React.FC<{ action: NonNullable<OverlayState['action']>; 
 
   if (action === 'rewind-5' || action === 'rewind-10') {
     return (
-      <div className="absolute inset-0 flex items-center justify-start pointer-events-none z-30 pl-[15%]">
+      <div className="absolute top-1/2 left-[40%] -translate-x-1/2 -translate-y-1/2 pointer-events-none z-30">
         <div className="bg-black/40 backdrop-blur-sm p-4 sm:p-6 rounded-full animate-ping-once flex flex-col items-center justify-center text-white">
           <Rewind size={28} className="sm:w-10 sm:h-10" fill="currentColor" />
           <span className="text-xs font-bold mt-0.5 sm:mt-1">{action === 'rewind-5' ? '-5s' : '-10s'}</span>

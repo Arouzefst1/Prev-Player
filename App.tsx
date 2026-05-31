@@ -1,4 +1,5 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
+import type { Update } from '@tauri-apps/plugin-updater';
 import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
@@ -73,31 +74,29 @@ function App() {
   const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
   const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
   const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
-  const [updateBanner, setUpdateBanner] = useState<{ version: string; url: string } | null>(null);
+  const [updateBanner, setUpdateBanner] = useState<{ version: string; notes?: string } | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'downloading' | 'installing' | 'error'>('idle');
+  const [updateProgress, setUpdateProgress] = useState(0); // 0–100, –1 = indeterminate
+  const updateRef = useRef<Update | null>(null);
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
 
-  // Check GitHub releases for a newer version; show a banner if one is found
+  // Ask the Tauri updater whether a newer (signed) release exists; show a banner if so.
+  // The updater fetches the `latest.json` manifest from the configured GitHub endpoint
+  // and verifies its signature against the bundled public key.
   useEffect(() => {
     const checkUpdate = async () => {
       try {
-        const { getVersion } = await import('@tauri-apps/api/app');
-        const current = await getVersion();
-        const res = await fetch('https://api.github.com/repos/Arouzefst1/Prev-Player/releases/latest', {
-          headers: { Accept: 'application/vnd.github.v3+json' },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const latest = (data.tag_name ?? '').replace(/^v/, '');
-        if (!latest || latest === current) return;
-        // Simple semver comparison: split on dots, compare numerically
-        const parse = (v: string) => v.split('.').map(Number);
-        const [la, lb = 0, lc = 0] = parse(latest);
-        const [ca, cb = 0, cc = 0] = parse(current);
-        const isNewer = la > ca || (la === ca && lb > cb) || (la === ca && lb === cb && lc > cc);
-        if (isNewer) setUpdateBanner({ version: latest, url: data.html_url as string });
-      } catch {}
+        const { check } = await import('@tauri-apps/plugin-updater');
+        const update = await check();
+        if (update) {
+          updateRef.current = update;
+          setUpdateBanner({ version: update.version, notes: update.body });
+        }
+      } catch {
+        // Offline, manifest not published yet, or running in a plain browser — ignore.
+      }
     };
     const t = setTimeout(checkUpdate, 4000); // wait for app to settle
     return () => clearTimeout(t);
@@ -514,13 +513,47 @@ function App() {
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
-  const handleOpenUpdate = async () => {
-    if (!updateBanner) return;
+  // Download + install the pending update, then relaunch into the new version.
+  const handleInstallUpdate = async () => {
+    const update = updateRef.current;
+    if (!update || updateStatus === 'downloading' || updateStatus === 'installing') return;
     try {
-      const { openUrl } = await import('@tauri-apps/plugin-opener');
-      await openUrl(updateBanner.url);
-    } catch { window.open(updateBanner.url, '_blank'); }
+      setUpdateStatus('downloading');
+      setUpdateProgress(0);
+      let downloaded = 0;
+      let total = 0;
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case 'Started':
+            total = event.data.contentLength ?? 0;
+            setUpdateProgress(total > 0 ? 0 : -1); // -1 => indeterminate (no length header)
+            break;
+          case 'Progress':
+            downloaded += event.data.chunkLength ?? 0;
+            if (total > 0) setUpdateProgress(Math.min(100, Math.round((downloaded / total) * 100)));
+            break;
+          case 'Finished':
+            setUpdateProgress(100);
+            setUpdateStatus('installing');
+            break;
+        }
+      });
+      // Installer ran successfully — restart so the user lands on the new build.
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (e) {
+      console.error('Update failed:', e);
+      setUpdateStatus('error');
+    }
   };
+
+  const dismissUpdate = () => {
+    setUpdateBanner(null);
+    setUpdateStatus('idle');
+    setUpdateProgress(0);
+  };
+
+  const isUpdating = updateStatus === 'downloading' || updateStatus === 'installing';
 
   return (
     <div className="w-screen h-screen bg-neutral-900 text-white overflow-hidden flex flex-col font-sans">
@@ -542,23 +575,44 @@ function App() {
                 <p className="text-sm text-neutral-400">PREV Player v{updateBanner.version}</p>
               </div>
             </div>
-            <p className="text-neutral-300 text-sm leading-relaxed mb-6">
-              A new version of PREV Player is ready. Update now to get the latest features and improvements.
+            <p className={`text-sm leading-relaxed mb-6 ${updateStatus === 'error' ? 'text-red-400' : 'text-neutral-300'}`}>
+              {updateStatus === 'error'
+                ? "Couldn't install the update. Check your internet connection and try again."
+                : 'A new version of PREV Player is ready. Update now to get the latest features and improvements.'}
             </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setUpdateBanner(null)}
-                className="flex-1 px-4 py-2.5 rounded-xl bg-neutral-700 hover:bg-neutral-600 text-sm font-medium text-neutral-200 transition-colors active:scale-[0.97]"
-              >
-                Later
-              </button>
-              <button
-                onClick={handleOpenUpdate}
-                className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-sm font-bold text-white transition-all shadow-lg shadow-red-600/20 active:scale-[0.97]"
-              >
-                Update Now
-              </button>
-            </div>
+
+            {isUpdating ? (
+              <div className="mb-1">
+                <div className="h-2 w-full bg-neutral-700 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full bg-gradient-to-r from-red-500 to-purple-500 transition-all duration-200 ${updateProgress < 0 ? 'animate-pulse w-1/3' : ''}`}
+                    style={updateProgress >= 0 ? { width: `${updateProgress}%` } : undefined}
+                  />
+                </div>
+                <p className="text-xs text-neutral-400 mt-2 text-center">
+                  {updateStatus === 'installing'
+                    ? 'Installing… the app will restart automatically'
+                    : updateProgress < 0
+                      ? 'Downloading…'
+                      : `Downloading… ${updateProgress}%`}
+                </p>
+              </div>
+            ) : (
+              <div className="flex gap-3">
+                <button
+                  onClick={dismissUpdate}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-neutral-700 hover:bg-neutral-600 text-sm font-medium text-neutral-200 transition-colors active:scale-[0.97]"
+                >
+                  Later
+                </button>
+                <button
+                  onClick={handleInstallUpdate}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-sm font-bold text-white transition-all shadow-lg shadow-red-600/20 active:scale-[0.97]"
+                >
+                  {updateStatus === 'error' ? 'Retry' : 'Update Now'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
