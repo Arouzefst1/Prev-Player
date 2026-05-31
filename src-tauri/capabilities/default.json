@@ -7,6 +7,10 @@
     "core:event:default",
     "dialog:allow-open",
     "fs:read-all",
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "**" }]
+    },
     "opener:default",
     "opener:allow-open-url",
     "updater:default",

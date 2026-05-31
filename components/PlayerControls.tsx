@@ -335,7 +335,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </button>
             
             {showSettings && (
-                <div className="absolute bottom-12 right-0 bg-black/90 backdrop-blur-md rounded-xl p-1.5 sm:p-2 w-40 sm:w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-xs sm:text-sm z-50">
+                <div className="absolute bottom-12 right-0 bg-black/90 rounded-xl p-1.5 sm:p-2 w-40 sm:w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-xs sm:text-sm z-50">
                     <div className="p-1.5 sm:p-2 border-b border-white/10 mb-1.5 sm:mb-2 font-bold text-gray-400 text-xs">Settings</div>
                     <div className="mb-1.5 sm:mb-2">
                         <div className="px-2 py-0.5 text-xs text-gray-400 font-semibold uppercase tracking-wider">Speed</div>

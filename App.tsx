@@ -114,6 +114,27 @@ function App() {
         setVideoLibrary(metas);
       } catch {}
 
+      // Backfill real file sizes for older entries saved with size 0. `stat` reads
+      // only the file's metadata (the size), so this never copies the file or uses
+      // extra storage. Runs in the background and updates the UI as it resolves.
+      const needSize = metas.filter(m => !m.size);
+      if (needSize.length > 0) {
+        (async () => {
+          try {
+            const { stat } = await import('@tauri-apps/plugin-fs');
+            for (const m of needSize) {
+              try {
+                const size = (await stat(m.path)).size;
+                if (size && size !== m.size) {
+                  await videoStore.updateMeta(m.id, { size });
+                  setVideoLibrary(prev => prev.map(v => (v.id === m.id ? { ...v, size } : v)));
+                }
+              } catch {}
+            }
+          } catch {}
+        })();
+      }
+
       // Restore last-played video reference
       const lastRaw = localStorage.getItem(STORAGE_LAST_VIDEO);
       if (lastRaw) {
@@ -201,19 +222,25 @@ function App() {
     if (items.length === 0) return;
     metaQueueRef.current = metaQueueRef.current.then(async () => {
       const { convertFileSrc } = await import('@tauri-apps/api/core');
+      const { stat } = await import('@tauri-apps/plugin-fs');
       for (const { path, id } of items) {
         const fileUrl = convertFileSrc(path);
         let thumbnail: string | undefined;
         let duration: number | undefined;
+        let size: number | undefined;
         try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {}
         try { duration = await getVideoDuration(fileUrl); } catch {}
-        if (thumbnail || duration !== undefined) {
-          try { await videoStore.updateMeta(id, { thumbnail, duration }); } catch {}
-          setVideoLibrary(prev => prev.map(v =>
-            v.id === id
-              ? { ...v, ...(thumbnail ? { thumbnail } : {}), ...(duration !== undefined ? { duration } : {}) }
-              : v
-          ));
+        // Real file size straight from the file-system metadata — reads the size
+        // only, never the bytes, so it does NOT copy the file / use extra storage.
+        try { size = (await stat(path)).size; } catch {}
+        const patch = {
+          ...(thumbnail ? { thumbnail } : {}),
+          ...(duration !== undefined ? { duration } : {}),
+          ...(size !== undefined ? { size } : {}),
+        };
+        if (Object.keys(patch).length > 0) {
+          try { await videoStore.updateMeta(id, patch); } catch {}
+          setVideoLibrary(prev => prev.map(v => (v.id === id ? { ...v, ...patch } : v)));
         }
       }
     });

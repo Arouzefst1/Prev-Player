@@ -113,7 +113,7 @@ const QueuePanel: React.FC<{
 }> = ({ playlist, currentIndex, onJumpTo, onReorder, onClose }) => {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   return (
-    <div className="absolute top-0 right-0 bottom-0 w-80 max-w-[85%] bg-black/95 backdrop-blur-md z-50 flex flex-col border-l border-neutral-800 animate-[slideInRight_0.25s_ease]">
+    <div className="absolute top-0 right-0 bottom-0 w-80 max-w-[85%] bg-black/95 z-50 flex flex-col border-l border-neutral-800 animate-[slideInRight_0.25s_ease]">
       <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
         <div>
           <h3 className="text-sm font-bold text-white">Queue</h3>
@@ -976,7 +976,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {/* Speed Overlay Animation - shows when holding spacebar OR changing speed with Shift+>/< */}
       {showSpeedOverlay && (
         <div className="absolute top-2 sm:top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
-          <div className="bg-black/70 backdrop-blur-sm px-4 sm:px-5 py-1.5 sm:py-2 rounded-full shadow-lg">
+          <div className="bg-black/70 px-4 sm:px-5 py-1.5 sm:py-2 rounded-full shadow-lg">
             <span className="text-white font-bold text-sm sm:text-lg">{speedOverlayValue}</span>
           </div>
         </div>
@@ -986,7 +986,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {onFileSelect && (
         <button
           onClick={handleOpenFileDialog}
-          className={`absolute left-2 sm:left-4 top-2 sm:top-4 z-30 bg-black/60 hover:bg-black/80 text-white p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-300 hover:scale-110 group active:scale-95 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          className={`absolute left-2 sm:left-4 top-2 sm:top-4 z-30 bg-black/70 hover:bg-black/80 text-white p-1.5 sm:p-2 rounded-full transition-all duration-300 hover:scale-110 group active:scale-95 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
           title="Open Video File"
         >
           <FolderOpen size={18} className="sm:w-5 sm:h-5 group-hover:text-red-400 transition-colors" />
@@ -1052,7 +1052,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {showLibraryButton && onOpenLibrary && (
         <button
           onClick={onOpenLibrary}
-          className={`absolute top-2 right-2 sm:top-4 sm:right-4 z-40 bg-black/50 hover:bg-black/70 text-white p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-300 active:scale-95 ${
+          className={`absolute top-2 right-2 sm:top-4 sm:right-4 z-40 bg-black/60 hover:bg-black/70 text-white p-1.5 sm:p-2 rounded-full transition-all duration-300 active:scale-95 ${
             showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
           title="Video Library"

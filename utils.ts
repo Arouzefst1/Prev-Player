@@ -268,7 +268,7 @@ export const videoStore = {
     });
   },
 
-  async updateMeta(id: string, patch: { thumbnail?: string; duration?: number }): Promise<void> {
+  async updateMeta(id: string, patch: { thumbnail?: string; duration?: number; size?: number }): Promise<void> {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -279,6 +279,7 @@ export const videoStore = {
         if (record) {
           if (patch.thumbnail !== undefined) record.thumbnail = patch.thumbnail;
           if (patch.duration !== undefined) record.duration = patch.duration;
+          if (patch.size !== undefined) record.size = patch.size;
           store.put(record);
         }
       };
