@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="Zenith Player - A powerful, responsive video player for all devices with offline support" />
+    <meta name="theme-color" content="#1a1a1a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PREV" />
+    
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%231a1a1a' width='192' height='192'/><path fill='%23ef4444' d='M60 50h72v92H60z'/><polygon fill='%23fff' points='80,70 80,120 120,95'/></svg>" />
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%231a1a1a' width='180' height='180'/><path fill='%23ef4444' d='M50 45h80v90H50z'/><polygon fill='%23fff' points='70,60 70,105 110,82.5'/></svg>" />
+    
+    <title>PREV Player</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom Range Input Styling for smoother look */
+      input[type="range"] {
+        -webkit-appearance: none;
+        background: transparent;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        height: 16px;
+        width: 16px;
+        border-radius: 50%;
+        background: #ffffff;
+        cursor: pointer;
+        margin-top: -6px; /* You need to specify a margin in Chrome, but in Firefox and IE it is automatic */
+        box-shadow: 0 0 10px rgba(0,0,0,0.5);
+      }
+      input[type="range"]::-moz-range-thumb {
+        height: 16px;
+        width: 16px;
+        border: none;
+        border-radius: 50%;
+        background: #ffffff;
+        cursor: pointer;
+        box-shadow: 0 0 10px rgba(0,0,0,0.5);
+      }
+      input[type="range"]::-webkit-slider-runnable-track {
+        width: 100%;
+        height: 4px;
+        cursor: pointer;
+        background: rgba(255, 255, 255, 0.3);
+        border-radius: 2px;
+      }
+      input[type="range"]:focus {
+        outline: none;
+      }
+
+      /* Sleek, subtle scrollbar (replaces the chunky default WebView one). */
+      .custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
+      .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.18);
+        border-radius: 999px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.32); }
+      .custom-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+
+      /* Hide scrollbar for clean UI.
+         NOTE (native engine): html/body are transparent so the mpv video, which
+         renders BEHIND the WebView, shows through. Opaque screens (home, library)
+         set their own background; the player view stays transparent over mpv. */
+      html, body {
+        overflow: hidden;
+        background: transparent;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+      }
+
+      /* Mobile responsive adjustments */
+      @media (max-width: 640px) {
+        body {
+          font-size: 14px;
+        }
+
+        /* Ensure video fills screen properly on mobile */
+        video {
+          object-fit: contain;
+        }
+
+        /* Larger touch targets on mobile - minimum 44x44px */
+        button {
+          min-height: 44px;
+          min-width: 44px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        /* Improve scrolling performance on mobile */
+        .custom-scrollbar {
+          -webkit-overflow-scrolling: touch;
+          scroll-behavior: smooth;
+        }
+
+        /* Prevent zoom on double-tap */
+        input[type="range"] {
+          touch-action: manipulation;
+        }
+      }
+
+      /* Tablet and larger */
+      @media (min-width: 641px) {
+        input[type="range"]::-webkit-slider-thumb {
+          height: 18px;
+          width: 18px;
+          margin-top: -7px;
+        }
+        input[type="range"]::-moz-range-thumb {
+          height: 18px;
+          width: 18px;
+        }
+      }
+
+      /* Folded phone support (supports CSS media queries for foldable devices) */
+      @media (fold-left: 0px) {
+        /* Left half of foldable device */
+        .video-player-container {
+          max-width: 50vw;
+        }
+      }
+
+      @media (fold-right: 0px) {
+        /* Right half of foldable device */
+        .video-player-container {
+          margin-left: 50vw;
+          max-width: 50vw;
+        }
+      }
+
+      /* Animation utilities */
+      @keyframes fade-in-out {
+        0% { opacity: 0; transform: scale(0.8); }
+        50% { opacity: 1; transform: scale(1); }
+        100% { opacity: 0; transform: scale(0.8); }
+      }
+
+      @keyframes ping-once {
+        0%   { opacity: 0; transform: scale(0.8); }
+        10%  { opacity: 1; transform: scale(1.1); }
+        20%  { opacity: 1; transform: scale(1); }
+        75%  { opacity: 1; transform: scale(1); }
+        100% { opacity: 0; transform: scale(1.08); }
+      }
+
+      @keyframes bounce-slow {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-8px); }
+      }
+
+      .animate-fade-in-out {
+        animation: fade-in-out 0.6s ease-in-out;
+      }
+
+      .animate-ping-once {
+        animation: ping-once 0.6s ease-in-out forwards;
+      }
+
+      .animate-bounce-slow {
+        animation: bounce-slow 2s infinite;
+      }
+
+      @keyframes speed-fade {
+        0% { opacity: 1; transform: translateX(-50%) scale(1); }
+        70% { opacity: 1; transform: translateX(-50%) scale(1); }
+        100% { opacity: 0; transform: translateX(-50%) scale(0.9); }
+      }
+
+      .animate-speed-fade {
+        animation: speed-fade 0.8s ease-out forwards;
+      }
+
+      /* Ambient glow animations for hover effects */
+      @keyframes ambient-pulse-1 {
+        0%, 100% { 
+          opacity: 0.3;
+          transform: scale(1);
+        }
+        50% { 
+          opacity: 0.6;
+          transform: scale(1.1);
+        }
+      }
+
+      @keyframes ambient-pulse-2 {
+        0%, 100% { 
+          opacity: 0.2;
+          transform: scale(1);
+        }
+        50% { 
+          opacity: 0.5;
+          transform: scale(0.9);
+        }
+      }
+
+      @keyframes shimmer {
+        0% {
+          background-position: -1000px 0;
+        }
+        100% {
+          background-position: 1000px 0;
+        }
+      }
+
+      .animate-pulse {
+        animation: ambient-pulse-1 3s ease-in-out infinite;
+      }
+
+      .animate-shimmer {
+        background-size: 1000px 100%;
+        animation: shimmer 2s infinite;
+        background-image: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+      }
+
+      /* Library drag-reorder & icon animations */
+      @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        20% { transform: translateX(-3px) rotate(-2deg); }
+        40% { transform: translateX(3px) rotate(2deg); }
+        60% { transform: translateX(-2px) rotate(-1deg); }
+        80% { transform: translateX(2px) rotate(1deg); }
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .animate-fade-in {
+        animation: fadeIn 0.2s ease-out;
+      }
+
+      @keyframes scaleX {
+        from { transform: scaleX(0); }
+        to { transform: scaleX(1); }
+      }
+
+      @keyframes slideInRight {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+      }
+
+      /* Progress ring pulse glow for loading indicator (Fix #6) */
+      @keyframes progressPulse {
+        0%, 100% { filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.3)); }
+        50% { filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5)); }
+      }
+
+      .animate-spin svg circle:last-of-type {
+        animation: progressPulse 2s ease-in-out infinite;
+      }
+
+      @supports (font-size-adjust: 0.5) {
+        body {
+          font-size-adjust: 0.5;
+        }
+      }
+    </style>
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+  
+</body>
+</html>

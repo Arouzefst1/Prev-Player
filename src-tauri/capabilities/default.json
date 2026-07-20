@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capability for PREV Player",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:event:default",
@@ -9,11 +11,22 @@
     "fs:read-all",
     {
       "identifier": "fs:allow-stat",
-      "allow": [{ "path": "**" }]
+      "allow": [
+        {
+          "path": "**"
+        }
+      ]
     },
     "opener:default",
     "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir",
     "updater:default",
-    "process:default"
+    "process:default",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-fullscreen",
+    "deep-link:default"
   ]
 }

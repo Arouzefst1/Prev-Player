@@ -1,0 +1,57 @@
+name: Release
+
+# Publishes a signed build + auto-updater manifest whenever you push a version
+# tag (e.g. `git tag v1.0.1 && git push <remote> v1.0.1`).
+#
+# IMPORTANT: the app checks for updates at
+#   https://github.com/Arouzefst1/Prev-Player/releases/latest/download/latest.json
+# so this workflow must run in the **Prev-Player** repo (that's where the release,
+# the installer, and latest.json need to live). If you publish somewhere else,
+# update `plugins.updater.endpoints` in src-tauri/tauri.conf.json to match.
+#
+# Required repository secret (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY  – full contents of prev-player-updater.key
+# The key has NO password, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD is optional —
+# just don't create it; the env var below falls back to an empty string, which is fine.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build, sign, and publish release (+ latest.json)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'PREV Player ${{ github.ref_name }}'
+          releaseBody: 'Install/download below. Existing installs will auto-update.'
+          releaseDraft: false
+          prerelease: false

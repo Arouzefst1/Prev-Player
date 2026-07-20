@@ -31,3 +31,6 @@ dist-ssr
 *.key
 *.key.pub
 /.tauri/
+
+# bundled mpv engine binary (large)
+full-engine/src-tauri/resources/mpv/

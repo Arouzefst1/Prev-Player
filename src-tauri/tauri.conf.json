@@ -1,6 +1,6 @@
 {
   "productName": "PREV Player",
-  "version": "1.0.4",
+  "version": "1.0.13",
   "identifier": "com.prev-player.app",
   "build": {
     "beforeDevCommand": "npm run vite-dev",
@@ -17,6 +17,11 @@
       "windows": {
         "installMode": "passive"
       }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["prevplayer"]
+      }
     }
   },
   "bundle": {
@@ -29,6 +34,12 @@
         "ext": ["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ogv", "ogg", "3gp", "3g2", "ts", "mts", "m2ts", "vob", "mpg", "mpeg"],
         "name": "Video File",
         "description": "Video files",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mp3", "m4a", "aac", "wav", "flac", "opus", "oga", "weba", "wma", "mka", "aiff", "aif"],
+        "name": "Audio File",
+        "description": "Audio files",
         "role": "Viewer"
       }
     ],

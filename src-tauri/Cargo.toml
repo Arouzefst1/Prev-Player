@@ -1,6 +1,6 @@
 [package]
 name = "prev-player"
-version = "1.0.4"
+version = "1.0.13"
 edition = "2021"
 
 [lib]
@@ -18,6 +18,16 @@ tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Sharing: stream files to/from GitHub Release assets (free CDN backend) + GitHub API.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tauri-plugin-deep-link = "2"
+# LAN sharing: a tiny local HTTP server that streams the file (range/seek) with
+# nothing stored in the cloud — ephemeral, no account.
+tiny_http = "0.12"
 
 # Auto-updater: checks the signed `latest.json` manifest, downloads + installs
 # the new build, then `tauri-plugin-process` is used to relaunch the app.

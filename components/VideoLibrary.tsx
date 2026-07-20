@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Search, Grid, List, X, ChevronLeft } from 'lucide-react';
+import { Play, Trash2, Search, Grid, List, X, ChevronLeft, Share2, Home, ListPlus } from 'lucide-react';
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
   useDndContext,
@@ -19,6 +19,10 @@ interface VideoLibraryProps {
   videos: VideoMeta[];
   onPlayVideo: (video: VideoMeta) => void;
   onDeleteVideo: (id: string) => void;
+  onShareVideo?: (video: VideoMeta) => void;
+  onShareFolder?: (videoIds: string[], name: string) => void;
+  onAddToQueue?: (video: VideoMeta) => void;
+  onGoHome?: () => void;
   onClose: () => void;
   onAddVideos?: () => void;
   onReorderVideos?: (orderedIds: string[]) => void;
@@ -136,6 +140,8 @@ interface SortableVideoItemProps {
   onPlay: (v: VideoMeta, idx: number) => void;
   onDelete?: (id: string) => void;
   onRemove?: (id: string) => void;
+  onShare?: (v: VideoMeta) => void;
+  onAddToQueue?: (v: VideoMeta) => void;
   numbered?: boolean;
   editMode?: boolean;
   selected?: boolean;
@@ -143,7 +149,7 @@ interface SortableVideoItemProps {
 }
 
 const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
-  video, index, onPlay, onDelete, onRemove, numbered, editMode, selected, onToggleSelect,
+  video, index, onPlay, onDelete, onRemove, onShare, onAddToQueue, numbered, editMode, selected, onToggleSelect,
 }) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging, isSorting, activeIndex, overIndex } = useSortable({ id: video.id });
 
@@ -232,6 +238,20 @@ const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
           <Play size={16} className="text-white fill-white" />
         </button>
 
+        {/* Add to queue */}
+        {!editMode && onAddToQueue && (
+          <button onClick={(e) => { e.stopPropagation(); onAddToQueue(video); }} title="Add to queue" className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200">
+            <ListPlus size={16} />
+          </button>
+        )}
+
+        {/* Share */}
+        {!editMode && onShare && (
+          <button onClick={(e) => { e.stopPropagation(); onShare(video); }} title="Share" className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200">
+            <Share2 size={16} />
+          </button>
+        )}
+
         {/* Remove / Delete */}
         {onRemove ? (
           <button onClick={(e) => { e.stopPropagation(); onRemove(video.id); }} className="p-2 rounded-full opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 hover:bg-red-600/20 transition-all duration-200">
@@ -255,6 +275,10 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   videos,
   onPlayVideo,
   onDeleteVideo,
+  onShareVideo,
+  onShareFolder,
+  onAddToQueue,
+  onGoHome,
   onClose,
   onAddVideos,
   onReorderVideos,
@@ -552,9 +576,16 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               <p className="text-neutral-400 text-sm mt-0.5">{folderVideos.length} videos</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
-            <X size={24} className="text-neutral-400 hover:text-white" />
-          </button>
+          <div className="flex items-center gap-1">
+            {onGoHome && (
+              <button onClick={onGoHome} title="Home" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+                <Home size={22} className="text-neutral-400 hover:text-white" />
+              </button>
+            )}
+            <button onClick={onClose} title="Close" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+              <X size={24} className="text-neutral-400 hover:text-white" />
+            </button>
+          </div>
         </div>
 
         {/* Toolbar */}
@@ -598,6 +629,17 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
               From PC
+            </button>
+          )}
+
+          {/* Share whole folder */}
+          {onShareFolder && openFolder && openFolder.videoIds.length > 0 && (
+            <button
+              onClick={() => onShareFolder!(openFolder.videoIds, openFolder.name)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm text-neutral-300 hover:text-white transition-all active:scale-95"
+              title="Share this folder"
+            >
+              <Share2 size={16} /> Share
             </button>
           )}
 
@@ -709,6 +751,8 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                     numbered
                     onPlay={(_v, idx) => onPlayFolder?.(openFolder.videoIds, false, folderLoop, idx)}
                     onRemove={removeVideoFromFolder}
+                    onShare={onShareVideo}
+                    onAddToQueue={onAddToQueue}
                   />
                 ))}
               </SortableContext>
@@ -765,9 +809,16 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
             </>
           )}
         </div>
-        <button onClick={onClose} className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
-          <X size={24} className="text-neutral-400 hover:text-white" />
-        </button>
+        <div className="flex items-center gap-1">
+          {onGoHome && (
+            <button onClick={onGoHome} title="Home" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+              <Home size={22} className="text-neutral-400 hover:text-white" />
+            </button>
+          )}
+          <button onClick={onClose} title="Close" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+            <X size={24} className="text-neutral-400 hover:text-white" />
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -939,6 +990,8 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                       index={i}
                       onPlay={(v) => onPlayVideo(v)}
                       onDelete={onDeleteVideo}
+                      onShare={onShareVideo}
+                      onAddToQueue={onAddToQueue}
                       editMode={editMode}
                       selected={selectedIds.has(video.id)}
                       onToggleSelect={toggleSelectVideo}
@@ -1058,6 +1111,17 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                       >{folder.name}</h3>
                     )}
                     <p className="text-xs text-neutral-500 mt-1">{fvids.length} video{fvids.length !== 1 ? 's' : ''}</p>
+
+                    {/* Share folder */}
+                    {onShareFolder && folder.videoIds.length > 0 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onShareFolder!(folder.videoIds, folder.name); }}
+                        className="absolute top-2 right-10 p-1.5 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all"
+                        title="Share folder"
+                      >
+                        <Share2 size={14} />
+                      </button>
+                    )}
 
                     {/* Delete */}
                     <button

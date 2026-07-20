@@ -1,8 +1,9 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import type { Update } from '@tauri-apps/plugin-updater';
-import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight } from 'lucide-react';
+import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight, RefreshCw, Share2 } from 'lucide-react';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
+import ShareModal from './components/ShareModal';
 import {
   srtToVtt,
   extractVideoThumbnail,
@@ -17,16 +18,21 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.webm', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ogv', '.ogg',
-  '.m4v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts', '.vob', '.mpg', '.mpeg',
-]);
-
 const VIDEO_EXT_LIST = ['mp4','webm','mkv','avi','mov','wmv','flv','ogv','ogg','m4v','3gp','3g2','ts','mts','m2ts','vob','mpg','mpeg'];
+const AUDIO_EXT_LIST = ['mp3','m4a','aac','wav','flac','opus','oga','weba','wma','mka','aiff','aif'];
+const MEDIA_EXT_LIST = [...VIDEO_EXT_LIST, ...AUDIO_EXT_LIST];
+
+// Accepts both video and audio (the <video> element plays audio files too).
+const MEDIA_EXTENSIONS = new Set(MEDIA_EXT_LIST.map(e => '.' + e));
 
 function isVideoPath(p: string): boolean {
   const ext = '.' + p.split('.').pop()?.toLowerCase();
-  return VIDEO_EXTENSIONS.has(ext);
+  return MEDIA_EXTENSIONS.has(ext);
+}
+
+function isAudioPath(p: string): boolean {
+  const ext = p.split('.').pop()?.toLowerCase() ?? '';
+  return AUDIO_EXT_LIST.includes(ext);
 }
 
 function typeFromPath(p: string): string {
@@ -38,6 +44,10 @@ function typeFromPath(p: string): string {
     m4v: 'video/mp4', '3gp': 'video/3gpp', '3g2': 'video/3gpp2',
     ts: 'video/mp2t', mts: 'video/mp2t', m2ts: 'video/mp2t',
     vob: 'video/mpeg', mpg: 'video/mpeg', mpeg: 'video/mpeg',
+    // Audio
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav',
+    flac: 'audio/flac', opus: 'audio/opus', oga: 'audio/ogg', weba: 'audio/webm',
+    wma: 'audio/x-ms-wma', mka: 'audio/x-matroska', aiff: 'audio/aiff', aif: 'audio/aiff',
   };
   return map[ext] ?? 'video/mp4';
 }
@@ -77,30 +87,72 @@ function App() {
   const [updateBanner, setUpdateBanner] = useState<{ version: string; notes?: string } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'downloading' | 'installing' | 'error'>('idle');
   const [updateProgress, setUpdateProgress] = useState(0); // 0–100, –1 = indeterminate
+  const [appVersion, setAppVersion] = useState('');
+  const [manualCheck, setManualCheck] = useState<'idle' | 'checking' | 'uptodate' | 'error'>('idle');
   const updateRef = useRef<Update | null>(null);
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
 
-  // Ask the Tauri updater whether a newer (signed) release exists; show a banner if so.
-  // The updater fetches the `latest.json` manifest from the configured GitHub endpoint
-  // and verifies its signature against the bundled public key.
-  useEffect(() => {
-    const checkUpdate = async () => {
-      try {
-        const { check } = await import('@tauri-apps/plugin-updater');
-        const update = await check();
-        if (update) {
-          updateRef.current = update;
-          setUpdateBanner({ version: update.version, notes: update.body });
-        }
-      } catch {
-        // Offline, manifest not published yet, or running in a plain browser — ignore.
-      }
-    };
-    const t = setTimeout(checkUpdate, 4000); // wait for app to settle
-    return () => clearTimeout(t);
+  // --- Sharing ---
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareTarget, setShareTarget] = useState<{ path: string; name: string } | null>(null);
+  const [folderTarget, setFolderTarget] = useState<{ files: { path: string; name: string }[]; name: string } | null>(null);
+  const [shareInitialLink, setShareInitialLink] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; action?: { label: string; run: () => void } } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string, action?: { label: string; run: () => void }) => {
+    setToast({ msg, action });
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), action ? 6000 : 2500);
   }, []);
+  const openReceive = useCallback(() => { setShareTarget(null); setFolderTarget(null); setShareInitialLink(null); setShareOpen(true); }, []);
+  const shareVideo = useCallback((v: VideoMeta) => { setFolderTarget(null); setShareTarget({ path: v.path, name: v.name }); setShareOpen(true); }, []);
+  const hasInLibrary = useCallback((name: string) => videoLibrary.some(v => v.name === name), [videoLibrary]);
+
+  // Auto-expire old GitHub shares on launch so nothing lingers in the cloud.
+  useEffect(() => { import('./share').then(m => m.cleanupExpiredShares().catch(() => {})); }, []);
+
+  // Ask the Tauri updater whether a newer (signed) release exists; show the dialog if so.
+  // Shared by the startup auto-check and the manual "Check for updates" button — so a user
+  // who clicked "Later" can re-trigger it anytime. The updater fetches latest.json from the
+  // GitHub endpoint and verifies its signature against the bundled public key. When found,
+  // the dialog's "Update Now" downloads + installs + relaunches (no manual installer).
+  const runUpdateCheck = useCallback(async (manual: boolean) => {
+    if (manual) setManualCheck('checking');
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check();
+      if (update) {
+        updateRef.current = update;
+        setUpdateStatus('idle');
+        setUpdateProgress(0);
+        setUpdateBanner({ version: update.version, notes: update.body });
+        if (manual) setManualCheck('idle');
+      } else if (manual) {
+        setManualCheck('uptodate');
+        setTimeout(() => setManualCheck('idle'), 3000);
+      }
+    } catch {
+      // Offline, manifest not published yet, or running in a plain browser.
+      if (manual) {
+        setManualCheck('error');
+        setTimeout(() => setManualCheck('idle'), 3000);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    // Grab the running version for display, then auto-check shortly after launch.
+    (async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        setAppVersion(await getVersion());
+      } catch {}
+    })();
+    const t = setTimeout(() => runUpdateCheck(false), 4000); // wait for app to settle
+    return () => clearTimeout(t);
+  }, [runUpdateCheck]);
 
   // ---------------------------------------------------------------------------
   // Boot: load library from IndexedDB, handle initial files from CLI args
@@ -250,6 +302,11 @@ function App() {
   // Core: add file paths to the library and build a playlist for immediate playback
   // ---------------------------------------------------------------------------
   const handleFilePaths = useCallback(async (paths: string[]) => {
+    // A prevplayer:// deep-link (from clicking a share link) arrives here as an
+    // "argument" — route it to the receive flow instead of treating it as a file.
+    const link = paths.find(p => typeof p === 'string' && p.trim().toLowerCase().startsWith('prevplayer://'));
+    if (link) { setShareTarget(null); setFolderTarget(null); setShareInitialLink(link.trim()); setShareOpen(true); return; }
+
     const videoPaths = paths.filter(isVideoPath);
     if (videoPaths.length === 0) { setError('No playable video files found.'); return; }
     setError(null);
@@ -284,6 +341,15 @@ function App() {
     setCurrentIndex(0);
     setWasPlayingBeforeLibrary(true);
 
+    // Selected several files at once → play them in order + offer to save as a folder.
+    if (playlistItems.length > 1) {
+      const batchIds = playlistItems.map(pi => pi.id);
+      showToast(`Playing ${playlistItems.length} videos in order`, {
+        label: 'Save as folder',
+        run: () => saveIdsAsFolderRef.current(batchIds),
+      });
+    }
+
     if (newMetas.length > 0) {
       // Show optimistically in library right away
       setVideoLibrary(prev => [...newMetas.filter(m => !prev.some(e => e.id === m.id)), ...prev]);
@@ -296,7 +362,7 @@ function App() {
       // Background: extract thumbnail + duration
       enqueueMetaExtraction(newMetas.map(m => ({ path: m.path, id: m.id })));
     }
-  }, [enqueueMetaExtraction]);
+  }, [enqueueMetaExtraction, showToast]);
 
   // Add paths to library only (no auto-play), used from the library panel
   const handleAddToLibraryOnly = useCallback(async (paths: string[]) => {
@@ -371,8 +437,12 @@ function App() {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const result = await open({
       multiple: true,
-      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
-      title: 'Add Video Files',
+      filters: [
+        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Video Files', extensions: VIDEO_EXT_LIST },
+        { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+      ],
+      title: 'Add Media Files',
     });
     if (!result) return;
     const paths = Array.isArray(result) ? result : [result];
@@ -387,8 +457,12 @@ function App() {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const result = await open({
       multiple: true,
-      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
-      title: 'Open Video Files',
+      filters: [
+        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Video Files', extensions: VIDEO_EXT_LIST },
+        { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+      ],
+      title: 'Open Media Files',
     });
 
     if (result) {
@@ -407,8 +481,12 @@ function App() {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const result = await open({
       multiple: true,
-      filters: [{ name: 'Video Files', extensions: VIDEO_EXT_LIST }],
-      title: 'Add Videos to Folder',
+      filters: [
+        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Video Files', extensions: VIDEO_EXT_LIST },
+        { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+      ],
+      title: 'Add Media to Folder',
     });
     if (!result) return;
     const paths = Array.isArray(result) ? result : [result];
@@ -437,6 +515,80 @@ function App() {
     setShowLibrary(false);
     setWasPlayingBeforeLibrary(true);
   }, []);
+
+  // Watch received shares by streaming their CDN URLs directly (no download).
+  const watchUrls = useCallback((items: { url: string; name: string }[], startIndex: number) => {
+    if (items.length === 0) return;
+    const pl: PlaylistItem[] = items.map((it, i) => ({ id: `stream-${i}-${genId()}`, src: it.url, name: it.name }));
+    setPlaylist(pl);
+    setCurrentIndex(Math.min(startIndex, pl.length - 1));
+    setShowLibrary(false);
+    setWasPlayingBeforeLibrary(true);
+  }, []);
+
+  // Open an already-owned library video by file name (used when a received share
+  // is already present locally — no need to re-download).
+  const openByName = useCallback((name: string) => {
+    const v = videoLibrary.find(x => x.name === name);
+    if (v) playFromLibrary(v);
+  }, [videoLibrary, playFromLibrary]);
+
+  // A received file finished downloading → sync it into the library, then play it.
+  const importDownloaded = useCallback(async (localPath: string, name: string) => {
+    let meta = videoLibrary.find(v => v.name === name);
+    if (!meta) {
+      const id = genId();
+      meta = { id, name, path: localPath, size: 0, addedAt: Date.now(), type: typeFromPath(name) };
+      try { await videoStore.save({ id, name, path: localPath, size: 0, addedAt: Date.now(), type: meta.type }); } catch {}
+      const created = meta;
+      setVideoLibrary(prev => [created, ...prev.filter(v => v.id !== id)]);
+      // Backfill real file size + thumbnail + duration (was showing 0 MB / no thumb).
+      enqueueMetaExtraction([{ path: localPath, id }]);
+    }
+    // Tell the user where it landed.
+    const folder = localPath.replace(/[\\/][^\\/]+$/, '');
+    showToast(`Saved to ${folder}`, { label: 'Open folder', run: async () => {
+      try { const { revealItemInDir } = await import('@tauri-apps/plugin-opener'); await revealItemInDir(localPath); } catch {}
+    }});
+    await playFromLibrary(meta);
+  }, [videoLibrary, playFromLibrary, enqueueMetaExtraction, showToast]);
+
+  // Share a whole folder (its videos) via the share modal.
+  const handleShareFolder = useCallback((videoIds: string[], name: string) => {
+    const files = videoIds
+      .map(id => videoLibrary.find(v => v.id === id))
+      .filter((v): v is VideoMeta => !!v)
+      .map(v => ({ path: v.path, name: v.name }));
+    if (files.length === 0) return;
+    setShareTarget(null); setShareInitialLink(null);
+    setFolderTarget({ files, name });
+    setShareOpen(true);
+  }, [videoLibrary]);
+
+  // Append a video to the play queue without interrupting what's playing.
+  const addToQueue = useCallback(async (video: VideoMeta) => {
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const item: PlaylistItem = { id: video.id, src: convertFileSrc(video.path), name: video.name, thumbnail: video.thumbnail };
+    setPlaylist(prev => {
+      if (prev.some(p => p.id === video.id)) { showToast('Already in queue'); return prev; }
+      if (prev.length === 0) { setCurrentIndex(0); setWasPlayingBeforeLibrary(true); showToast(`Playing “${video.name}”`); return [item]; }
+      showToast(`Added to queue (${prev.length + 1})`);
+      return [...prev, item];
+    });
+  }, [showToast]);
+
+  // Save an explicit set of video IDs as a named folder (WebView2 lacks
+  // window.prompt, so we use a default name the user can rename in Folders).
+  const saveIdsAsFolder = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const { folderStore } = await import('./utils');
+    const name = `Queue ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    folderStore.save({ id: genId(), name, videoIds: ids, createdAt: Date.now() });
+    setVideoLibrary(prev => [...prev]); // nudge folders re-render
+    showToast(`Saved “${name}” — rename it in Folders`);
+  }, [showToast]);
+  const saveIdsAsFolderRef = useRef(saveIdsAsFolder);
+  useEffect(() => { saveIdsAsFolderRef.current = saveIdsAsFolder; }, [saveIdsAsFolder]);
 
   // Play an entire folder/playlist, optionally starting at a specific index
   const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean, startIndex = 0) => {
@@ -647,11 +799,11 @@ function App() {
         <div ref={playerWrapperRef} className="relative w-full h-full flex bg-black">
           <div className="relative flex-1 h-full bg-black">
             <VideoPlayer
-              key={playlist[currentIndex].id}
               videoId={playlist[currentIndex].id}
               src={playlist[currentIndex].src}
               subtitlesSrc={playlist[currentIndex].subtitleSrc}
               autoPlay={wasPlayingBeforeLibrary}
+              isAudio={isAudioPath(playlist[currentIndex].name)}
               onEnded={playNext}
               onChangeVideo={openLibrary}
               onFileSelect={handleOpenFilesViaDialog}
@@ -678,6 +830,10 @@ function App() {
               videos={videoLibrary}
               onPlayVideo={playFromLibrary}
               onDeleteVideo={deleteFromLibrary}
+              onShareVideo={shareVideo}
+              onShareFolder={handleShareFolder}
+              onAddToQueue={addToQueue}
+              onGoHome={handleGoHome}
               onClose={closeLibrary}
               onAddVideos={handleAddFilesViaDialog}
               onReorderVideos={handleReorderVideos}
@@ -777,6 +933,15 @@ function App() {
               )}
             </div>
 
+            {/* Open a shared link (receive) */}
+            <button
+              onClick={openReceive}
+              className="flex items-center justify-center gap-2 w-full mt-3 px-4 py-3.5 rounded-2xl font-medium text-sm text-neutral-200 bg-neutral-800/80 hover:bg-neutral-700 ring-1 ring-white/5 transition-all active:scale-[0.98]"
+            >
+              <Share2 size={18} />
+              <span>Share &amp; Receive</span>
+            </button>
+
             {error && (
               <div className="mt-5 flex items-center text-red-400 bg-red-400/10 px-4 py-3 rounded-xl text-sm">
                 <AlertCircle size={16} className="mr-2 flex-shrink-0" />
@@ -793,6 +958,25 @@ function App() {
               </svg>
               Drag &amp; drop videos anywhere to play
             </p>
+
+            {/* Check for updates */}
+            <div className="mt-6 flex flex-col items-center gap-1">
+              <button
+                onClick={() => runUpdateCheck(true)}
+                disabled={manualCheck === 'checking'}
+                className="flex items-center gap-2 text-xs font-medium text-neutral-400 hover:text-white transition-colors disabled:opacity-60"
+              >
+                <RefreshCw size={13} className={manualCheck === 'checking' ? 'animate-spin' : ''} />
+                {manualCheck === 'checking'
+                  ? 'Checking for updates…'
+                  : manualCheck === 'uptodate'
+                    ? "You're on the latest version"
+                    : manualCheck === 'error'
+                      ? "Couldn't check — tap to retry"
+                      : 'Check for updates'}
+              </button>
+              {appVersion && <span className="text-[11px] text-neutral-600">PREV Player v{appVersion}</span>}
+            </div>
           </div>
         </div>
       )}
@@ -803,6 +987,10 @@ function App() {
           videos={videoLibrary}
           onPlayVideo={playFromLibrary}
           onDeleteVideo={deleteFromLibrary}
+          onShareVideo={shareVideo}
+          onShareFolder={handleShareFolder}
+          onAddToQueue={addToQueue}
+          onGoHome={handleGoHome}
           onClose={closeLibrary}
           onAddVideos={handleAddFilesViaDialog}
           onReorderVideos={handleReorderVideos}
@@ -827,6 +1015,35 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Toast (queue / save-as-folder / share confirmations) */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[280] flex items-center gap-3 bg-neutral-900/95 border border-neutral-700 rounded-full pl-4 pr-2 py-2 shadow-xl shadow-black/50 animate-[fadeIn_0.15s_ease]">
+          <span className="text-sm text-neutral-200 whitespace-nowrap">{toast.msg}</span>
+          {toast.action && (
+            <button
+              onClick={() => { toast.action!.run(); setToast(null); }}
+              className="text-xs font-semibold text-white bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 rounded-full px-3 py-1.5 transition-colors"
+            >
+              {toast.action.label}
+            </button>
+          )}
+          <button onClick={() => setToast(null)} className="p-1 text-neutral-500 hover:text-white"><span className="text-lg leading-none">×</span></button>
+        </div>
+      )}
+
+      {/* Share / receive modal */}
+      <ShareModal
+        open={shareOpen}
+        onClose={() => { setShareOpen(false); setShareInitialLink(null); }}
+        shareTarget={shareTarget}
+        folderTarget={folderTarget}
+        initialLink={shareInitialLink}
+        onWatch={watchUrls}
+        hasInLibrary={hasInLibrary}
+        onOpenByName={openByName}
+        onImported={importDownloaded}
+      />
     </div>
   );
 }

@@ -1,5 +1,10 @@
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
+#[cfg(desktop)]
+use tauri_plugin_deep_link::DeepLinkExt;
+
+mod share;
+mod lan;
 
 struct InitialFiles(Mutex<Vec<String>>);
 
@@ -20,6 +25,7 @@ pub fn run() {
         .collect();
 
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .manage(InitialFiles(Mutex::new(initial_files)))
         // Single-instance: if a second instance is opened (e.g. user opens another video
         // file), forward the new file paths to the already-running window.
@@ -50,7 +56,27 @@ pub fn run() {
         .plugin(tauri_plugin_process::init());
 
     builder
-        .invoke_handler(tauri::generate_handler![get_initial_files])
+        .setup(|app| {
+            // Register the prevplayer:// scheme at runtime so links open the app
+            // during development (the installer registers it for release builds).
+            #[cfg(desktop)]
+            {
+                let _ = app.deep_link().register_all();
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_initial_files,
+            share::download_file,
+            share::upload_github_asset,
+            share::github_api,
+            share::write_temp_file,
+            share::share_download_dir,
+            lan::lan_share_file,
+            lan::lan_share_folder,
+            lan::lan_stop,
+            lan::lan_stop_all
+        ])
         .run(tauri::generate_context!())
         .expect("error while running PREV Player");
 }

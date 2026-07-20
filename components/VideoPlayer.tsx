@@ -1,5 +1,5 @@
 ﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, FolderOpen, AlertCircle, X, Play } from 'lucide-react';
+import { Upload, FolderOpen, AlertCircle, X, Play, RotateCcw, Music } from 'lucide-react';
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent,
 } from '@dnd-kit/core';
@@ -22,6 +22,7 @@ interface VideoPlayerProps {
   videoId?: string;
   subtitlesSrc?: string | null;
   autoPlay?: boolean;
+  isAudio?: boolean;
   onEnded?: () => void;
   onChangeVideo?: () => void;
   onFileSelect?: () => void;
@@ -146,7 +147,8 @@ const QueuePanel: React.FC<{
 // ============================================================
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
-  src, videoId, subtitlesSrc, autoPlay = false, onEnded, onChangeVideo, onFileSelect, onPlayStateChange,
+  src, videoId, subtitlesSrc, autoPlay = false, isAudio = false,
+  onEnded, onChangeVideo, onFileSelect, onPlayStateChange,
   onNext, onPrev, hasNext, hasPrev,
   playlist: playlistInfo, currentIndex: currentPlaylistIndex, onJumpTo,
   onReorderPlaylist,
@@ -171,6 +173,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const isTouchHoldRef = useRef<boolean>(false);
   const hasRestoredProgressRef = useRef<boolean>(false);
   const lastProgressSaveRef = useRef<number>(0);
+  const resumePromptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstSrcRef = useRef<boolean>(true);
 
   // Player State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -197,6 +201,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [codecSupport, setCodecSupport] = useState<Record<string, boolean>>({});
+  // MX Player–style resume prompt: the time (sec) we resumed from, or null when hidden.
+  const [resumeFrom, setResumeFrom] = useState<number | null>(null);
 
   // --- Effect: Codec Support Detection ---
   useEffect(() => {
@@ -219,8 +225,71 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (saved && saved >= 5 && saved < duration - 5) {
       videoRef.current.currentTime = saved;
       setCurrentTime(saved);
+      // Show the "resumed from … / start over" prompt for 5s.
+      setResumeFrom(saved);
+      if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
+      resumePromptTimerRef.current = setTimeout(() => setResumeFrom(null), 5000);
     }
   }, [duration, videoId]);
+
+  // Clear the resume-prompt timer on unmount.
+  useEffect(() => () => {
+    if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
+  }, []);
+
+  // --- Effect: Handle source change WITHOUT remounting the <video> element. ---
+  // The player is no longer keyed per-video, so advancing the playlist swaps the
+  // src on the same element. That keeps the Picture-in-Picture window attached
+  // (it follows the new source) instead of closing on a remount. We reset the
+  // per-video UI state and resume playback for the new clip.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // Reset per-video state so resume/error/progress apply to the new clip.
+    hasRestoredProgressRef.current = false;
+    lastProgressSaveRef.current = 0;
+    if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
+    setResumeFrom(null);
+    setHasError(false);
+    setErrorMessage('');
+    setCurrentTime(0);
+    setDuration(0);
+
+    if (isFirstSrcRef.current) {
+      // Initial mount — the autoPlay effect + <video> element handle first load.
+      isFirstSrcRef.current = false;
+      return;
+    }
+
+    // Subsequent change (playlist advance / jump). React already changed the src
+    // attribute, which implicitly reloads the element — we deliberately DON'T call
+    // video.load() here because that can tear down the Picture-in-Picture window in
+    // some WebView builds. Instead we just re-apply settings and resume playback so
+    // the PiP window keeps floating with the new clip.
+    video.defaultPlaybackRate = playbackSpeed;
+    video.playbackRate = playbackSpeed;
+    video.volume = volume;
+    video.muted = isMuted;
+    if (autoPlay) {
+      video.play().then(() => {
+        setIsPlaying(true);
+        onPlayStateChange?.(true);
+      }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
+
+  // "Start over" → restart from the beginning and dismiss the prompt.
+  const handleStartOver = useCallback(() => {
+    if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
+    setResumeFrom(null);
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+      setCurrentTime(0);
+      videoRef.current.play().catch(() => {});
+    }
+  }, []);
 
   // --- Effect: Persist playback position (resume-where-you-left-off) ---
   useEffect(() => {
@@ -504,6 +573,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         await win.show();
         await win.unminimize();
         await win.setFocus();
+        // On Windows, setFocus() alone often won't raise a window that's behind
+        // others (e.g. after clicking the PiP window's "Back to tab"). Toggling
+        // always-on-top forces it to the foreground, then we release it.
+        try {
+          await win.setAlwaysOnTop(true);
+          await win.setAlwaysOnTop(false);
+          await win.setFocus();
+        } catch {}
         // setFullscreen via Tauri API — doesn't require a user-gesture unlike requestFullscreen()
         if (restoreFullscreen) await win.setFullscreen(true);
       } catch {
@@ -961,17 +1038,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         }}
       />
 
-      {/* Error Display */}
-      {hasError && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-50">
-          <div className="text-center">
-            <p className="text-red-400 text-lg mb-2">⚠️ Playback Error</p>
-            <p className="text-white">{errorMessage}</p>
+      {/* Audio poster — audio files have no picture, so show a music visual */}
+      {isAudio && !hasError && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-[5] bg-gradient-to-br from-neutral-900 via-black to-neutral-900">
+          <div className={`flex items-center justify-center w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-white/5 border border-white/10 ${isPlaying ? 'animate-pulse' : ''}`}>
+            <Music size={56} className="text-white/70 sm:w-16 sm:h-16" />
           </div>
         </div>
       )}
-
-
 
       {/* Speed Overlay Animation - shows when holding spacebar OR changing speed with Shift+>/< */}
       {showSpeedOverlay && (
@@ -995,6 +1069,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       {/* Overlay Animations */}
       <ActionOverlay overlayState={overlayState} />
+
+      {/* Resume prompt (MX Player–style): video already continues from where it
+          was left; this lets the user jump back to the start. Auto-hides after 5s. */}
+      {resumeFrom !== null && (
+        <div className="absolute right-3 sm:right-4 bottom-20 sm:bottom-24 z-30 animate-fade-in pointer-events-auto">
+          <button
+            onClick={handleStartOver}
+            className="flex items-center gap-1.5 bg-black/80 hover:bg-black/90 text-white text-xs sm:text-sm font-medium rounded-full px-3 sm:px-4 py-2 shadow-lg border border-white/10 transition-colors active:scale-95"
+            title="Start from the beginning"
+          >
+            <RotateCcw size={14} className="shrink-0" />
+            Start over
+          </button>
+        </div>
+      )}
 
       {/* Bottom Controls */}
       <PlayerControls

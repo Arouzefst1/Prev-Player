@@ -1,0 +1,71 @@
+{
+  "productName": "PREV Player",
+  "version": "1.1.9",
+  "identifier": "com.prev-player.app",
+  "build": {
+    "beforeDevCommand": "npm run vite-dev",
+    "devUrl": "http://localhost:3001",
+    "beforeBuildCommand": "npm run vite-build",
+    "frontendDist": "../dist"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcyOEQyNEM1RTQyRjQ0ODkKUldTSlJDL2t4U1NOY3JXUDgzZkF0THFkemROMmNYbnhiQkdrSXBWdEF4aEZNd0l3UStBa1lXUDEK",
+      "endpoints": [
+        "https://github.com/Arouzefst1/Prev-Player/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["prevplayer"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "resources": ["resources/mpv/*"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "fileAssociations": [
+      {
+        "ext": ["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ogv", "ogg", "3gp", "3g2", "ts", "mts", "m2ts", "vob", "mpg", "mpeg"],
+        "name": "Video File",
+        "description": "Video files",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mp3", "m4a", "aac", "wav", "flac", "opus", "oga", "weba", "wma", "mka", "aiff", "aif"],
+        "name": "Audio File",
+        "description": "Audio files",
+        "role": "Viewer"
+      }
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PREV Player",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "transparent": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  }
+}
