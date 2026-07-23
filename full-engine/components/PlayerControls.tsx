@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings, Captions, MoreVertical } from 'lucide-react';
 import { formatTime } from '../utils';
+import { useSettings } from '../settings';
+import SpeedPanel from './SpeedPanel';
 
 interface PlayerControlsProps {
   isPlaying: boolean;
@@ -74,8 +76,8 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
   const progressPercent = duration ? (currentTime / duration) * 100 : 0;
-
-  const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  const [appSettings] = useSettings();
+  const speedStep = appSettings.speedStep ?? 0.5;
 
   const formatTime = (seconds: number): string => {
     if (!seconds || !isFinite(seconds)) return '0:00';
@@ -335,27 +337,12 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </button>
             
             {showSettings && (
-                <div className="absolute bottom-12 right-0 bg-black/90 rounded-xl p-1.5 sm:p-2 w-40 sm:w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-xs sm:text-sm z-50">
-                    <div className="p-1.5 sm:p-2 border-b border-white/10 mb-1.5 sm:mb-2 font-bold text-gray-400 text-xs">Settings</div>
-                    <div className="mb-1.5 sm:mb-2">
-                        <div className="px-2 py-0.5 text-xs text-gray-400 font-semibold uppercase tracking-wider">Speed</div>
-                        <div className="max-h-32 overflow-y-auto custom-scrollbar">
-                            {speeds.map(s => (
-                                <button
-                                    key={s}
-                                    onClick={() => {
-                                        onSpeedChange(s);
-                                        setShowSettings(false);
-                                    }}
-                                    className={`w-full text-left px-2 sm:px-3 py-1.5 sm:py-2 hover:bg-white/10 rounded flex justify-between text-xs sm:text-sm active:scale-95 ${playbackSpeed === s ? 'text-red-500 font-bold' : 'text-white'}`}
-                                >
-                                    <span>{s === 1 ? 'Normal' : s + 'x'}</span>
-                                    {playbackSpeed === s && <span>✓</span>}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
+                <SpeedPanel
+                    speed={playbackSpeed}
+                    step={speedStep}
+                    onChange={onSpeedChange}
+                    onClose={() => setShowSettings(false)}
+                />
             )}
           </div>
 

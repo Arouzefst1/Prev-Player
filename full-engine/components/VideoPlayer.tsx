@@ -16,6 +16,7 @@ import {
   mpvSetAudioTrack, mpvSetSubtitleTrack,
   type MpvState, type MpvTrack,
 } from '../mpv';
+import { settingsStore } from '../settings';
 
 /**
  * Minimal HTMLVideoElement-like surface backed by mpv. We point `videoRef` at one
@@ -878,12 +879,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             // Toggle subtitles on/off (drives mpv sub-visibility via the effect).
             setSubtitlesEnabled(prev => !prev);
             break;
-        case '>': // Shift + .
-          changeSpeed(Math.min(2, playbackSpeed + 0.25), true);
+        case '>': { // Shift + . — faster by the configurable step
+          const step = settingsStore.get().speedStep ?? 0.5;
+          changeSpeed(Math.min(4, +(playbackSpeed + step).toFixed(2)), true);
           break;
-        case '<': // Shift + ,
-          changeSpeed(Math.max(0.25, playbackSpeed - 0.25), true);
+        }
+        case '<': { // Shift + , — slower by the configurable step
+          const step = settingsStore.get().speedStep ?? 0.5;
+          changeSpeed(Math.max(0.25, +(playbackSpeed - step).toFixed(2)), true);
           break;
+        }
         default:
            // Number keys 0-9
            if (!isNaN(parseInt(e.key))) {

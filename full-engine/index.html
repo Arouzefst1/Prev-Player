@@ -262,6 +262,53 @@
           font-size-adjust: 0.5;
         }
       }
+
+      /* ── Playback-speed slider (YouTube-style) with a heart thumb ──────────
+         Selectors are qualified with input[type="range"] so they out-specify
+         the generic range styles above (incl. the >641px media query). The
+         filled portion is driven by a --pct custom property set inline. */
+      input[type="range"].speed-slider {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        background: transparent;
+      }
+      input[type="range"].speed-slider::-webkit-slider-runnable-track {
+        height: 5px;
+        border-radius: 999px;
+        background: linear-gradient(to right, #ffffff var(--pct, 50%), rgba(255,255,255,0.25) var(--pct, 50%));
+      }
+      input[type="range"].speed-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 16px;
+        height: 16px;
+        margin-top: -5.5px;
+        border: none;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        cursor: pointer;
+      }
+      input[type="range"].speed-slider::-moz-range-track {
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.25);
+      }
+      input[type="range"].speed-slider::-moz-range-progress {
+        height: 5px;
+        border-radius: 999px;
+        background: #ffffff;
+      }
+      input[type="range"].speed-slider::-moz-range-thumb {
+        width: 16px;
+        height: 16px;
+        border: none;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        cursor: pointer;
+      }
     </style>
 </head>
   <body>

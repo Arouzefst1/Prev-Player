@@ -24,6 +24,8 @@ export interface AppSettings {
   defaultVolume: number;
   /** Starting playback speed (0.25–2). */
   defaultSpeed: number;
+  /** How much the ">"/"<" keys and the speed panel's +/− buttons nudge speed. */
+  speedStep: number;
   /** Check for app updates automatically on launch. */
   autoCheckUpdates: boolean;
   /** Folder received/downloaded videos are saved to (null → Downloads/PREV Player). */
@@ -38,6 +40,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultView: 'list',
   defaultVolume: 1,
   defaultSpeed: 1,
+  speedStep: 0.5,
   autoCheckUpdates: true,
   downloadPath: null,
 };

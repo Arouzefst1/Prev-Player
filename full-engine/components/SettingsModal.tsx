@@ -124,6 +124,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
                 ))}
               </select>
             </Row>
+            <Row title={`Speed step — ${settings.speedStep}×`} desc="How much the > / < keys and the speed panel's +/− buttons change speed.">
+              <select
+                value={settings.speedStep}
+                onChange={(e) => onChange({ speedStep: parseFloat(e.target.value) })}
+                className="bg-neutral-800 text-white text-xs rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-red-500 cursor-pointer"
+              >
+                {[0.05, 0.1, 0.25, 0.5, 1].map(s => (
+                  <option key={s} value={s}>{s}×</option>
+                ))}
+              </select>
+            </Row>
           </div>
 
           {/* Downloads & updates */}
