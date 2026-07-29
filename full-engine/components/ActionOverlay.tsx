@@ -4,6 +4,8 @@ import { OverlayState } from '../utils';
 
 interface ActionOverlayProps {
   overlayState: OverlayState;
+  /** Scale the pills down for the picture-in-picture mini window. */
+  compact?: boolean;
 }
 
 /**
@@ -19,7 +21,7 @@ interface ActionOverlayProps {
  * stuck on-screen — that's fixed here.) No backdrop-blur (it lagged over playing video);
  * memoized so the player's time-update re-renders don't touch it.
  */
-const ActionOverlay: React.FC<ActionOverlayProps> = React.memo(({ overlayState }) => {
+const ActionOverlay: React.FC<ActionOverlayProps> = React.memo(({ overlayState, compact = false }) => {
   const { action, id, value } = overlayState;
 
   const [visible, setVisible] = useState(false);
@@ -55,35 +57,37 @@ const ActionOverlay: React.FC<ActionOverlayProps> = React.memo(({ overlayState }
   return (
     <>
       {/* Volume / mute — fixed top-center */}
-      <div className={`absolute top-3 sm:top-4 left-1/2 -translate-x-1/2 z-40 pointer-events-none ${layer(isVolume)}`}>
-        <div className={`${pill} gap-2 px-4 py-2`}>
-          {muted ? <VolumeX size={18} className="flex-shrink-0" /> : <Volume2 size={18} className="flex-shrink-0" />}
-          <span className="font-bold text-sm tabular-nums inline-block min-w-[3.5em] text-center">{shown.value}</span>
+      <div className={`absolute ${compact ? 'top-2' : 'top-3 sm:top-4'} left-1/2 -translate-x-1/2 z-40 pointer-events-none ${layer(isVolume)}`}>
+        <div className={`${pill} ${compact ? 'gap-1.5 px-2.5 py-1' : 'gap-2 px-4 py-2'}`}>
+          {muted
+            ? <VolumeX size={compact ? 13 : 18} className="flex-shrink-0" />
+            : <Volume2 size={compact ? 13 : 18} className="flex-shrink-0" />}
+          <span className={`font-bold tabular-nums inline-block text-center ${compact ? 'text-[11px] min-w-[3em]' : 'text-sm min-w-[3.5em]'}`}>{shown.value}</span>
         </div>
       </div>
 
       {/* Rewind — fixed left */}
       <div className={`absolute top-1/2 left-[9%] -translate-y-1/2 z-30 pointer-events-none ${layer(isRewind)}`}>
-        <div className={`${pill} flex-col p-4 sm:p-5`}>
-          <Rewind size={26} className="sm:w-8 sm:h-8" fill="currentColor" />
-          <span className="text-xs font-bold mt-0.5 sm:mt-1">{a === 'rewind-10' ? '-10s' : '-5s'}</span>
+        <div className={`${pill} flex-col ${compact ? 'p-2.5' : 'p-4 sm:p-5'}`}>
+          <Rewind size={compact ? 18 : 26} className={compact ? '' : 'sm:w-8 sm:h-8'} fill="currentColor" />
+          <span className={`font-bold ${compact ? 'text-[9px] mt-0.5' : 'text-xs mt-0.5 sm:mt-1'}`}>{a === 'rewind-10' ? '-10s' : '-5s'}</span>
         </div>
       </div>
 
       {/* Forward — fixed right */}
       <div className={`absolute top-1/2 right-[9%] -translate-y-1/2 z-30 pointer-events-none ${layer(isForward)}`}>
-        <div className={`${pill} flex-col p-4 sm:p-5`}>
-          <FastForward size={26} className="sm:w-8 sm:h-8" fill="currentColor" />
-          <span className="text-xs font-bold mt-0.5 sm:mt-1">{a === 'forward-10' ? '+10s' : '+5s'}</span>
+        <div className={`${pill} flex-col ${compact ? 'p-2.5' : 'p-4 sm:p-5'}`}>
+          <FastForward size={compact ? 18 : 26} className={compact ? '' : 'sm:w-8 sm:h-8'} fill="currentColor" />
+          <span className={`font-bold ${compact ? 'text-[9px] mt-0.5' : 'text-xs mt-0.5 sm:mt-1'}`}>{a === 'forward-10' ? '+10s' : '+5s'}</span>
         </div>
       </div>
 
       {/* Play / pause — fixed center */}
       <div className={`absolute inset-0 flex items-center justify-center z-30 pointer-events-none ${layer(isPlayPause)}`}>
-        <div className={`${pill} p-5 sm:p-6`}>
+        <div className={`${pill} ${compact ? 'p-3' : 'p-5 sm:p-6'}`}>
           {a === 'pause'
-            ? <Pause size={34} className="sm:w-12 sm:h-12" fill="currentColor" />
-            : <Play size={34} className="sm:w-12 sm:h-12" fill="currentColor" />}
+            ? <Pause size={compact ? 22 : 34} className={compact ? '' : 'sm:w-12 sm:h-12'} fill="currentColor" />
+            : <Play size={compact ? 22 : 34} className={compact ? '' : 'sm:w-12 sm:h-12'} fill="currentColor" />}
         </div>
       </div>
     </>

@@ -83,8 +83,12 @@ const mpvConfig = {
 ---
 
 ## Features to rebuild (browser-only today)
-1. **PiP** — browser PiP won't work with mpv. Re-implement as a small **always-on-top
-   borderless Tauri mini-window** that hosts mpv (or moves the mpv wid into it). UX same.
+1. ~~**PiP**~~ — **done.** Browser PiP needs a `<video>`; instead the main window itself
+   becomes the mini-player. Geometry lives in `pip.ts` (aspect-shaped sizing, work-area
+   clamping, corner snapping, aspect-locked resize, remembered footprint); the compact
+   control surface is `components/PipOverlay.tsx`. Note the app's 800×600 `minWidth`/
+   `minHeight` in `tauri.conf.json` **must** be lifted before shrinking, and restored on
+   exit — leaving it in place is what makes "PiP" look like an ordinary resized window.
 2. **Library thumbnails** — currently `<video>`+canvas. Generate via
    `mpv --vo=image` / a one-shot ffmpeg call, or `mpv screenshot-to-file`.
 3. **Codec-support error card** — replace with mpv error reporting (mpv plays ~everything,

@@ -1,5 +1,5 @@
 ﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, FolderOpen, AlertCircle, X, Play, RotateCcw, Music, Subtitles, AudioLines, Check } from 'lucide-react';
+import { Upload, FolderOpen, AlertCircle, X, Play, RotateCcw, Music, Subtitles, AudioLines, Check, Bookmark, BookmarkCheck } from 'lucide-react';
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent,
 } from '@dnd-kit/core';
@@ -9,11 +9,18 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
-import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress } from '../utils';
+import PipOverlay from './PipOverlay';
+import { nextLoopMode, type LoopMode } from './LoopButton';
+import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, isTypingTarget } from '../utils';
+import {
+  enterPipWindow, exitPipWindow, reshapePipWindow, resolveAspect, activeMonitor,
+  savePipPrefs, pipMinSize, pipMaxSize, fitToAspect, snapPosition,
+  type PrePipState,
+} from '../pip';
 import {
   initMpv, subscribeMpv, mpvLoad, mpvSetPaused, mpvSeekAbsolute, mpvSetVolume,
   mpvSetMuted, mpvSetSpeed, mpvSetLoop, mpvAddSubtitle, mpvSetSubtitleVisible,
-  mpvSetAudioTrack, mpvSetSubtitleTrack,
+  mpvSetAudioTrack, mpvSetSubtitleTrack, mpvFetchVideoAspect,
   type MpvState, type MpvTrack,
 } from '../mpv';
 import { settingsStore } from '../settings';
@@ -83,6 +90,16 @@ interface VideoPlayerProps {
   resumeEnabled?: boolean;   // resume from last position (default true)
   defaultVolume?: number;    // starting volume 0–1 (default 1)
   defaultSpeed?: number;     // starting playback speed (default 1)
+  /** Keep advancing through the queue while the mini-player is open (default true). */
+  pipAutoplayQueue?: boolean;
+  /** Queue-loop armed externally (e.g. a folder played with "loop" on). */
+  playlistLooping?: boolean;
+  /** Report the queue-loop state up — App owns the wrap-around at the end. */
+  onPlaylistLoopChange?: (loop: boolean) => void;
+  /** Save the current queue to the library as a named folder. */
+  onSaveQueue?: (name: string) => void;
+  /** This exact set of videos was already saved — hide the save offer. */
+  queueSaved?: boolean;
 }
 
 // ============================================================
@@ -146,8 +163,28 @@ const QueuePanel: React.FC<{
   onJumpTo: (i: number) => void;
   onReorder: (items: { id: string; name: string; thumbnail?: string }[]) => void;
   onClose: () => void;
-}> = ({ playlist, currentIndex, onJumpTo, onReorder, onClose }) => {
+  onSaveQueue?: (name: string) => void;
+  /** This exact set of videos is already in the library — don't ask again. */
+  alreadySaved?: boolean;
+}> = ({ playlist, currentIndex, onJumpTo, onReorder, onClose, onSaveQueue, alreadySaved }) => {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  // WebView2 has no window.prompt, so naming happens inline in the header.
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState('');
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (naming) nameInputRef.current?.focus(); }, [naming]);
+  // Adding a video re-opens the offer, so drop any half-typed name.
+  useEffect(() => { if (!alreadySaved) setNaming(false); }, [alreadySaved]);
+
+  const commitSave = () => {
+    const trimmed = name.trim();
+    if (!trimmed) { setNaming(false); return; }
+    onSaveQueue?.(trimmed);
+    setNaming(false);
+    setName('');
+  };
+
   return (
     <div className="absolute top-0 right-0 bottom-0 w-80 max-w-[85%] bg-black/95 z-50 flex flex-col border-l border-neutral-800 animate-[slideInRight_0.25s_ease]">
       <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
@@ -155,10 +192,58 @@ const QueuePanel: React.FC<{
           <h3 className="text-sm font-bold text-white">Queue</h3>
           <p className="text-xs text-neutral-500">{playlist.length} videos</p>
         </div>
-        <button onClick={onClose} className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
-          <X size={18} className="text-neutral-400" />
-        </button>
+        <div className="flex items-center gap-1">
+          {onSaveQueue && (
+            <button
+              onClick={() => {
+                if (alreadySaved) return; // saved — nothing to ask until the queue changes
+                setName(`Queue ${new Date().toLocaleDateString([], { month: 'short', day: 'numeric' })}`);
+                setNaming(v => !v);
+              }}
+              disabled={alreadySaved}
+              className={`p-1.5 rounded-lg transition-colors ${
+                alreadySaved ? 'text-red-500 cursor-default' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
+              }`}
+              title={alreadySaved ? 'Saved in your library' : 'Save this queue to your library'}
+            >
+              {alreadySaved
+                ? <BookmarkCheck size={18} className="loop-one-pop" />
+                : <Bookmark size={18} />}
+            </button>
+          )}
+          <button onClick={onClose} className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
+            <X size={18} className="text-neutral-400" />
+          </button>
+        </div>
       </div>
+
+      {/* Name the saved queue */}
+      {naming && (
+        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-neutral-800 bg-neutral-900/60">
+          <input
+            ref={nameInputRef}
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            // Belt and braces: the player also ignores keys aimed at text fields,
+            // but stopping here keeps the typing away from any other global handler.
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') commitSave();
+              if (e.key === 'Escape') { setNaming(false); setName(''); }
+            }}
+            onKeyUp={(e) => e.stopPropagation()}
+            placeholder="Name this queue…"
+            className="flex-1 min-w-0 bg-neutral-800 text-white text-sm rounded-lg px-2.5 py-1.5 outline-none border border-neutral-700 focus:border-red-500 transition-colors"
+          />
+          <button
+            onClick={commitSave}
+            className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors active:scale-95 shrink-0"
+          >
+            Save
+          </button>
+        </div>
+      )}
       <div className="flex-1 overflow-auto custom-scrollbar">
         <DndContext sensors={sensors} collisionDetection={closestCenter}
           onDragEnd={(event: DragEndEvent) => {
@@ -196,6 +281,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   resumeEnabled = true,
   defaultVolume = 1,
   defaultSpeed = 1,
+  pipAutoplayQueue = true,
+  playlistLooping,
+  onPlaylistLoopChange,
+  onSaveQueue,
+  queueSaved,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   // `videoRef` now points at an mpv-backed adapter instead of a <video> element.
@@ -206,6 +296,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     tracks: [], audioId: null, subId: null, videoAspect: null,
   });
   const endedFiredRef = useRef<boolean>(false);
+  /** Have we seen the CURRENT file actually playing yet? Guards stale eof ticks. */
+  const endedArmedRef = useRef<boolean>(false);
   const lastTimeUiRef = useRef<number>(0); // throttles the on-screen time/seek-bar
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -231,10 +323,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPip, setIsPip] = useState(false);
+  /** Mini-player stays above other windows — toggleable from its own top bar. */
+  const [isPipPinned, setIsPipPinned] = useState(true);
+  /** mpv's display aspect (dwidth/dheight); drives the mini-player's shape. */
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
-  const [isLooping, setIsLooping] = useState(false);
+  const [loopMode, setLoopMode] = useState<LoopMode>('off');
   // mpv embedded tracks (audio + subtitle) — the native engine's superpower.
   const [tracks, setTracks] = useState<MpvTrack[]>([]);
   const [audioId, setAudioId] = useState<number | null>(null);
@@ -270,29 +366,51 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const onEndedRef = useRef(onEnded);
   const onPlayStateChangeRef = useRef(onPlayStateChange);
   const resumeEnabledRef = useRef(resumeEnabled);
+  // The mount-once mpv subscription decides whether to advance the queue, so it
+  // needs the live PiP state + preference rather than the values it closed over.
+  const isPipRef = useRef(false);
+  const pipAutoplayQueueRef = useRef(pipAutoplayQueue);
+  // togglePip MUST keep a stable identity. App passes `onOpenLibrary` as an inline
+  // arrow, so a new function arrives on every App render — depending on it directly
+  // re-created togglePip constantly, which re-ran the keyboard effect and its
+  // cleanup (the one that clears the spacebar's hold timer) underneath live keys.
+  const onOpenLibraryRef = useRef(onOpenLibrary);
+  const showLibraryButtonRef = useRef(showLibraryButton);
+  const isAudioRef = useRef(isAudio);
   useEffect(() => { isDraggingRef.current = isDragging; }, [isDragging]);
+  useEffect(() => { isPipRef.current = isPip; }, [isPip]);
   useEffect(() => {
     videoIdRef.current = videoId;
     onEndedRef.current = onEnded;
     onPlayStateChangeRef.current = onPlayStateChange;
     resumeEnabledRef.current = resumeEnabled;
+    pipAutoplayQueueRef.current = pipAutoplayQueue;
+    onOpenLibraryRef.current = onOpenLibrary;
+    showLibraryButtonRef.current = showLibraryButton;
+    isAudioRef.current = isAudio;
   });
 
   // --- Effect: Initialize the mpv engine + build the <video>-like adapter. ---
   useEffect(() => {
     // The adapter translates the player's HTMLVideoElement-style calls into mpv.
+    // Every mpv call is fire-and-forget, so a rejected command used to vanish as
+    // an unhandled promise rejection — the picture kept playing (mpv is its own
+    // process) while the controls silently did nothing, with no clue why.
+    // Surface failures loudly; `[mpv]` in the console is the thread to pull.
+    const report = (what: string) => (e: unknown) => console.error(`[mpv] ${what} failed:`, e);
+
     const adapter: EngineAdapter = {
-      play() { mpvSetPaused(false); },
-      pause() { mpvSetPaused(true); },
+      play() { mpvSetPaused(false).catch(report('play')); },
+      pause() { mpvSetPaused(true).catch(report('pause')); },
       get paused() { return mpvStateRef.current.paused; },
       get currentTime() { return mpvStateRef.current.currentTime; },
-      set currentTime(t: number) { mpvSeekAbsolute(t); },
+      set currentTime(t: number) { mpvSeekAbsolute(t).catch(report('seek')); },
       get duration() { return mpvStateRef.current.duration; },
       get volume() { return mpvStateRef.current.volume; },
-      set volume(v: number) { mpvSetVolume(v); },
+      set volume(v: number) { mpvSetVolume(v).catch(report('volume')); },
       get muted() { return mpvStateRef.current.muted; },
-      set muted(m: boolean) { mpvSetMuted(m); },
-      set playbackRate(r: number) { mpvSetSpeed(r); },
+      set muted(m: boolean) { mpvSetMuted(m).catch(report('mute')); },
+      set playbackRate(r: number) { mpvSetSpeed(r).catch(report('speed')); },
       get playbackRate() { return mpvStateRef.current.speed; },
       set defaultPlaybackRate(_r: number) { /* mpv re-applies speed per file */ },
       get defaultPlaybackRate() { return mpvStateRef.current.speed; },
@@ -326,6 +444,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setTracks(s.tracks);
         setAudioId(s.audioId);
         setSubId(s.subId);
+        setVideoAspect(s.videoAspect);
 
         if (prevPaused !== s.paused) {
           onPlayStateChangeRef.current?.(!s.paused);
@@ -344,14 +463,32 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           saveVideoProgress(videoIdRef.current, s.currentTime, s.duration);
         }
 
-        // End-of-file → advance the playlist (once per file).
-        if (s.ended && !endedFiredRef.current) {
-          endedFiredRef.current = true;
+        // End-of-file → advance the playlist (once per file). In the mini-player
+        // the queue keeps rolling by default; turning the preference off parks on
+        // the last frame instead of pulling up the next clip while you're working.
+        //
+        // CRITICAL: only mark the end-of-file as "handled" when we actually act on
+        // it. Consuming the edge while declining to advance stranded the queue for
+        // good — mpv sits at EOF so `ended` never goes false again, the flag never
+        // resets, and leaving PiP couldn't revive it either.
+        // ALSO: mpv's `eof-reached` doesn't clear the instant we call loadfile —
+        // a tick carrying the PREVIOUS file's `ended: true` can arrive after the
+        // next clip has been asked for. The old "reset whenever ended is false"
+        // rule let that stale tick count as a fresh end-of-file and advance a
+        // second time, silently skipping a video. So EOF only counts once we've
+        // actually observed THIS file playing (ended === false) at least once.
+        if (!s.ended) {
+          endedArmedRef.current = true;
+          endedFiredRef.current = false;
+        } else if (endedArmedRef.current && !endedFiredRef.current) {
+          const advance = !isPipRef.current || pipAutoplayQueueRef.current;
           setIsPlaying(false);
           setShowControls(true);
-          onEndedRef.current?.();
-        } else if (!s.ended) {
-          endedFiredRef.current = false;
+          if (advance) {
+            endedFiredRef.current = true;
+            endedArmedRef.current = false;
+            onEndedRef.current?.();
+          }
         }
       });
     });
@@ -396,6 +533,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     hasRestoredProgressRef.current = false;
     lastProgressSaveRef.current = 0;
     endedFiredRef.current = false;
+    endedArmedRef.current = false; // re-arms only once the new file reports playing
     if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
     setResumeFrom(null);
     setHasError(false);
@@ -639,95 +777,237 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     onFileSelect?.();
   }, [onFileSelect]);
 
+  // Loop cycles off → repeat queue → repeat one. "One" is mpv's own file loop;
+  // "all" is a playlist concern, so it's reported up to App, which owns the
+  // wrap-around when the last item finishes.
+  const hasQueue = !!playlistInfo && playlistInfo.length > 1;
   const toggleLoop = useCallback(() => {
-    if (!videoRef.current) return;
-    const newLoop = !isLooping;
-    videoRef.current.loop = newLoop;
-    setIsLooping(newLoop);
-  }, [isLooping]);
+    setLoopMode((m) => nextLoopMode(m, hasQueue));
+  }, [hasQueue]);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.loop = loopMode === 'one';
+    onPlaylistLoopChange?.(loopMode === 'all');
+  }, [loopMode, onPlaylistLoopChange]);
+
+  // A folder played with "loop" turned on arrives pre-armed from the library.
+  useEffect(() => {
+    if (playlistLooping) setLoopMode((m) => (m === 'off' ? 'all' : m));
+  }, [playlistLooping]);
 
   // --- Picture-in-Picture (native engine) ---
-  // Browser PiP only works with a <video> element, which we no longer have. We
-  // emulate PiP by shrinking the whole OS window to a small, borderless,
-  // always-on-top mini-player in the bottom-right corner (mpv keeps rendering as
-  // the window resizes). Toggling again restores the previous size/position.
-  const prePipRef = useRef<{ w: number; h: number; x: number; y: number; fs: boolean } | null>(null);
+  // Browser PiP needs a <video> element, which this build doesn't have (mpv
+  // paints behind a transparent WebView). Real PiP here = the OS window itself
+  // becomes a small, borderless, always-on-top mini-player shaped to the video's
+  // aspect ratio, with its own compact control surface (see PipOverlay). The
+  // geometry — sizing, clamping, snapping, aspect locking — lives in ../pip.
+  const prePipRef = useRef<PrePipState | null>(null);
   const pipAspectRef = useRef<number>(16 / 9);
-  const togglePip = useCallback(async () => {
+  const pipBusyRef = useRef(false);
+
+  /** Remember the mini-player's footprint + resting place for next time. */
+  const persistPipGeometry = useCallback(async () => {
     try {
-      const winApi = await import('@tauri-apps/api/window');
-      const win = winApi.getCurrentWindow();
-
-      if (prePipRef.current) {
-        // Exit mini-player → restore EXACTLY what it was (fullscreen or windowed).
-        const p = prePipRef.current;
-        prePipRef.current = null;
-        setIsPip(false);
-        await win.setAlwaysOnTop(false);
-        await win.setDecorations(true);
-        if (p.fs) {
-          await win.setFullscreen(true);
-        } else {
-          await win.setSize(new winApi.PhysicalSize(p.w, p.h));
-          await win.setPosition(new winApi.PhysicalPosition(p.x, p.y));
-        }
-        return;
-      }
-
-      // Enter mini-player. Remember whether we were fullscreen + the window rect.
-      const wasFs = await win.isFullscreen();
-      await win.setFullscreen(false);
-      const size = await win.innerSize();      // PhysicalSize
-      const pos = await win.outerPosition();    // PhysicalPosition
-      prePipRef.current = { w: size.width, h: size.height, x: pos.x, y: pos.y, fs: wasFs };
-
-      const mon = await winApi.currentMonitor();
-      const sf = mon?.scaleFactor ?? 1;
-      // Size the window to the VIDEO's aspect ratio so there are no black bars.
-      const aspect = mpvStateRef.current.videoAspect || 16 / 9;
-      pipAspectRef.current = aspect;
-      const miniW = Math.round(440 * sf);
-      const miniH = Math.round(miniW / aspect);
-      await win.setDecorations(false);
-      await win.setResizable(true);
-      await win.setAlwaysOnTop(true);
-      await win.setSize(new winApi.PhysicalSize(miniW, miniH));
-      if (mon) {
-        const margin = Math.round(24 * sf);
-        const x = mon.position.x + mon.size.width - miniW - margin;
-        const y = mon.position.y + mon.size.height - miniH - margin - Math.round(48 * sf);
-        await win.setPosition(new winApi.PhysicalPosition(x, y));
-      }
-      setIsPip(true);
-    } catch (e) {
-      console.error('PiP (mini-window) error', e);
-    }
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      const [size, pos, mon] = await Promise.all([win.innerSize(), win.outerPosition(), activeMonitor()]);
+      savePipPrefs({ x: pos.x, y: pos.y, w: size.width, h: size.height }, mon);
+    } catch { /* geometry is a nicety — never let it break the toggle */ }
   }, []);
 
-  // While in PiP, keep the window locked to the video's aspect ratio as the user
-  // resizes it — so it stays borderless (no letterbox) and both axes scale together.
+  const togglePip = useCallback(async () => {
+    if (pipBusyRef.current) return; // the window transition takes a few frames
+    pipBusyRef.current = true;
+    try {
+      if (prePipRef.current) {
+        const prev = prePipRef.current;
+        prePipRef.current = null;
+        await persistPipGeometry();
+        setIsPip(false);
+        await exitPipWindow(prev);
+        setIsFullscreen(prev.fullscreen);
+      } else {
+        // A half-open library would squeeze the picture out of a 450px window.
+        if (showLibraryButtonRef.current === false) onOpenLibraryRef.current?.();
+        const isAudioNow = isAudioRef.current;
+        // Don't shrink to a 16:9 guess if mpv simply hasn't pushed dwidth/dheight
+        // yet — ask it outright, or a portrait clip opens inside a landscape frame.
+        let videoRatio = mpvStateRef.current.videoAspect;
+        if (videoRatio == null && !isAudioNow) videoRatio = await mpvFetchVideoAspect();
+        pipAspectRef.current = resolveAspect(videoRatio, isAudioNow);
+        prePipRef.current = await enterPipWindow(videoRatio, isAudioNow);
+        setIsFullscreen(false);
+        setIsPipPinned(true);
+        setIsPip(true);
+        containerRef.current?.focus(); // keep keyboard control in the mini window
+      }
+    } catch (e) {
+      // Never let a failed transition strand the app: the window could be
+      // borderless / on-top / size-capped while React thinks it's a normal
+      // player, which renders the full-size chrome into a window that can't
+      // grow. Force both back to the known-good "not in PiP" state.
+      console.error('PiP (mini-window) error', e);
+      const prev = prePipRef.current;
+      prePipRef.current = null;
+      setIsPip(false);
+      await exitPipWindow(prev).catch(() => {});
+    } finally {
+      pipBusyRef.current = false;
+    }
+  }, [persistPipGeometry]);
+
+  // SAFETY NET: every scrap of PiP state (isPip, prePipRef, the toggle, the
+  // overlay) lives in this component — so if the player unmounts while the
+  // mini-player is open, nothing is left alive to undo the window transform.
+  // That's what stranded the app as a tiny borderless always-on-top window
+  // showing the home screen with no way out: the queue ran dry, App dropped the
+  // player, and the window stayed shrunk forever. Restoring on unmount is the
+  // only place that can catch every exit path (queue end, Go Home, errors).
+  useEffect(() => () => {
+    const prev = prePipRef.current;
+    if (!prev) return;
+    prePipRef.current = null;
+    exitPipWindow(prev).catch(() => {});
+  }, []);
+
+  /** Top-bar pin: let the mini-player drop behind other windows if you want. */
+  const togglePipPin = useCallback(async () => {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const next = !isPipPinned;
+      await getCurrentWindow().setAlwaysOnTop(next);
+      setIsPipPinned(next);
+    } catch { /* ignore */ }
+  }, [isPipPinned]);
+
+  // Aspect lock — applied when the resize SETTLES, not on every event.
+  //
+  // Windows owns the mouse during an interactive resize (which is exactly what
+  // startResizeDragging hands it). A setSize() issued from inside that loop is
+  // simply overridden by the drag still in progress, so the old per-event
+  // correction never stuck — which is how the window ended up pillarboxed one
+  // way and letterboxed the other. Waiting for the drag to stop means our size
+  // is the last word. We measure the whole gesture (settled vs. where the drag
+  // began) to decide which edge was pulled, then re-derive the other axis.
   useEffect(() => {
     if (!isPip) return;
     let unlisten = () => {};
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
     let correcting = false;
+    let burstStart: { w: number; h: number } | null = null;
     (async () => {
       const winApi = await import('@tauri-apps/api/window');
       const win = winApi.getCurrentWindow();
+      const start = await win.innerSize();
+      let last = { w: start.width, h: start.height };
+
       unlisten = await win.onResized(({ payload }) => {
         if (correcting) return;
-        const aspect = pipAspectRef.current || 16 / 9;
-        const w = payload.width;
-        const expectedH = Math.round(w / aspect);
-        if (Math.abs(payload.height - expectedH) > 2) {
-          correcting = true;
-          win.setSize(new winApi.PhysicalSize(w, expectedH)).finally(() => {
-            setTimeout(() => { correcting = false; }, 60);
-          });
-        }
+        if (!settleTimer) burstStart = { ...last };  // first event of this drag
+        last = { w: payload.width, h: payload.height };
+        if (settleTimer) clearTimeout(settleTimer);
+
+        settleTimer = setTimeout(async () => {
+          settleTimer = null;
+          try {
+            const aspect = pipAspectRef.current;
+            // Re-read both: the window may have crossed to another monitor with
+            // a different scale factor mid-drag.
+            const [cur, mon] = await Promise.all([win.innerSize(), activeMonitor()]);
+            const origin = burstStart ?? { w: cur.width, h: cur.height };
+            const widthDriven = Math.abs(cur.width - origin.w) >= Math.abs(cur.height - origin.h);
+
+            const min = pipMinSize(aspect, mon?.scaleFactor ?? 1);
+            const max = mon ? pipMaxSize(aspect, mon) : { w: Number.MAX_SAFE_INTEGER, h: Number.MAX_SAFE_INTEGER };
+            const fit = fitToAspect(cur.width, cur.height, aspect, min, max, widthDriven);
+
+            if (Math.abs(fit.w - cur.width) > 2 || Math.abs(fit.h - cur.height) > 2) {
+              correcting = true;
+              last = fit;
+              await win.setSize(new winApi.PhysicalSize(fit.w, fit.h));
+              setTimeout(() => { correcting = false; }, 80);
+            }
+            persistPipGeometry();
+          } catch (e) {
+            correcting = false;
+            console.error('PiP aspect lock failed', e);
+          }
+        }, 180);
       });
     })();
-    return () => unlisten();
+    return () => { unlisten(); if (settleTimer) clearTimeout(settleTimer); };
+  }, [isPip, persistPipGeometry]);
+
+  // Magnetic corners: once the window comes to rest near a screen edge, pull it
+  // flush — and never let it end up under the taskbar or off-screen.
+  useEffect(() => {
+    if (!isPip) return;
+    let unlisten = () => {};
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let snapping = false;
+    (async () => {
+      const winApi = await import('@tauri-apps/api/window');
+      const win = winApi.getCurrentWindow();
+      unlisten = await win.onMoved(() => {
+        if (snapping) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(async () => {
+          try {
+            const mon = await activeMonitor();
+            if (!mon) return;
+            const [size, pos] = await Promise.all([win.innerSize(), win.outerPosition()]);
+            const rect = { x: pos.x, y: pos.y, w: size.width, h: size.height };
+            const snapped = snapPosition(rect, mon);
+            if (snapped) {
+              snapping = true;
+              await win.setPosition(new winApi.PhysicalPosition(snapped.x, snapped.y));
+              setTimeout(() => { snapping = false; }, 150);
+              savePipPrefs({ ...rect, ...snapped }, mon);
+            } else {
+              savePipPrefs(rect, mon);
+            }
+          } catch { /* ignore */ }
+        }, 260);
+      });
+    })();
+    return () => { unlisten(); if (timer) clearTimeout(timer); };
   }, [isPip]);
+
+  // The picture's shape can change under us — mpv reports the real aspect a beat
+  // after load, and the next item in the queue may be a portrait clip. Reshape
+  // the mini-player to match, keeping its footprint and the corner it's parked in.
+  useEffect(() => {
+    if (!isPip) return;
+    // Wait for mpv to report the real shape. Loading a file resets dwidth/dheight
+    // to null, so reshaping on the 16:9 fallback makes the window bounce to
+    // landscape and back every time the queue advances.
+    if (videoAspect == null && !isAudio) return;
+    const next = resolveAspect(videoAspect, isAudio);
+    pipAspectRef.current = next;
+    // Deliberately NO "has the ratio changed?" guard. The window can be the wrong
+    // shape while our tracked ratio is perfectly correct — a reshape that failed,
+    // a transition missed while the player was remounting, geometry restored from
+    // a previous session. That mismatch is what leaves a portrait video pillarboxed
+    // inside a landscape window. reshapePipWindow() no-ops when the size already
+    // matches, so re-running it on every reported aspect makes PiP self-correcting.
+    reshapePipWindow(next).catch((e) => console.error('PiP reshape failed', e));
+  }, [isPip, videoAspect, isAudio]);
+
+  // If mpv still hasn't told us the picture's shape, keep asking for a few
+  // seconds. A successful fetch emits new state, which trips the reshape above —
+  // so the mini-player corrects itself rather than sitting there letterboxed.
+  useEffect(() => {
+    if (!isPip || isAudio || videoAspect != null) return;
+    let cancelled = false;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancelled || attempts++ > 12) return;
+      const found = await mpvFetchVideoAspect();
+      if (!cancelled && found == null) setTimeout(poll, 400);
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [isPip, isAudio, videoAspect]);
 
   // Mobile touch hold for 2x speed
   const handleTouchStart = useCallback(() => {
@@ -773,8 +1053,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // KEYBOARD CONTROLS
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is typing in a text input
-      if ((e.target as HTMLElement).tagName === 'INPUT' && (e.target as HTMLInputElement).type === 'text') return;
+      // Ignore anything aimed at a text field (queue name box, search, …).
+      if (isTypingTarget(e.target)) return;
 
       // Prevent default for control keys
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
@@ -840,11 +1120,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           break;
         case 'f':
         case 'F':
-          toggleFullscreen();
+          // Fullscreen and the mini-player are opposite ends of the same axis —
+          // from PiP, `f` just steps back out to the full player.
+          if (isPip) togglePip();
+          else toggleFullscreen();
           break;
         case 'Escape':
           // Tauri window fullscreen doesn't auto-exit on Esc like DOM fullscreen.
-          if (isFullscreen) exitFullscreen();
+          if (isPip) togglePip();
+          else if (isFullscreen) exitFullscreen();
           else if (showQueue) setShowQueue(false);
           break;
         case 'p':
@@ -899,6 +1183,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      // The same guard as keydown — spacebar play/pause fires on key UP, so
+      // without this, typing a space in a text field still toggled playback
+      // (and preventDefault() below would have eaten the space entirely).
+      if (isTypingTarget(e.target)) return;
       if (e.code === 'Space') {
         e.preventDefault();
         
@@ -979,7 +1267,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       container?.removeEventListener('blur', handleWindowBlur);
       if (spaceHoldTimeoutRef.current) clearTimeout(spaceHoldTimeoutRef.current);
     };
-  }, [togglePlay, skip, volume, toggleFullscreen, exitFullscreen, togglePip, isFullscreen, showQueue, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay, toggleLoop, isLooping]);
+  }, [togglePlay, skip, volume, toggleFullscreen, exitFullscreen, togglePip, isPip, isFullscreen, showQueue, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay, toggleLoop, loopMode]);
 
   // Mouse side buttons (back/forward) → previous/next video, or seek ±10s if none.
   useEffect(() => {
@@ -1046,6 +1334,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       className={`relative w-full h-full bg-transparent group overflow-hidden flex flex-col justify-center select-none outline-none ${showControls ? '' : 'cursor-none'}`}
       tabIndex={0} // Allow focus
       onContextMenu={(e) => e.preventDefault()}
+      // In the mini-player there's no room for a volume slider on screen at all
+      // times — the wheel is the natural stand-in, with the usual overlay.
+      onWheel={isPip ? (e) => handleVolumeChange(volume + (e.deltaY < 0 ? 0.05 : -0.05), true, false) : undefined}
     >
       {/* Transparent click-surface. The actual picture is rendered by the mpv
           engine BEHIND the (transparent) WebView; this layer only captures
@@ -1055,10 +1346,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onPointerDown={(e) => {
           // In PiP the whole body drags the borderless window — but only once the
           // pointer actually moves, so a plain click still toggles play/pause.
+          // The threshold has to clear normal hand-wobble: once startDragging()
+          // hands the gesture to the compositor the WebView never sees the
+          // matching `click`, so too tight a threshold silently eats taps.
           if (!isPip || e.button !== 0) return;
           const sx = e.clientX, sy = e.clientY;
           const move = (me: PointerEvent) => {
-            if (Math.abs(me.clientX - sx) + Math.abs(me.clientY - sy) > 6) {
+            if (Math.hypot(me.clientX - sx, me.clientY - sy) > 12) {
               cleanup();
               import('@tauri-apps/api/window').then(w => w.getCurrentWindow().startDragging().catch(() => {}));
             }
@@ -1099,23 +1393,23 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {/* Audio poster — audio files have no picture, so show a music visual */}
       {isAudio && !hasError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-[5] bg-gradient-to-br from-neutral-900 via-black to-neutral-900">
-          <div className={`flex items-center justify-center w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-white/5 border border-white/10 ${isPlaying ? 'animate-pulse' : ''}`}>
-            <Music size={56} className="text-white/70 sm:w-16 sm:h-16" />
+          <div className={`flex items-center justify-center rounded-full bg-white/5 border border-white/10 ${isPip ? 'w-12 h-12' : 'w-28 h-28 sm:w-36 sm:h-36'} ${isPlaying ? 'animate-pulse' : ''}`}>
+            <Music size={isPip ? 22 : 56} className={`text-white/70 ${isPip ? '' : 'sm:w-16 sm:h-16'}`} />
           </div>
         </div>
       )}
 
       {/* Speed Overlay Animation - shows when holding spacebar OR changing speed with Shift+>/< */}
       {showSpeedOverlay && (
-        <div className="absolute top-2 sm:top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
-          <div className="bg-black/70 px-4 sm:px-5 py-1.5 sm:py-2 rounded-full shadow-lg">
-            <span className="text-white font-bold text-sm sm:text-lg">{speedOverlayValue}</span>
+        <div className={`absolute left-1/2 -translate-x-1/2 z-50 pointer-events-none ${isPip ? 'top-2' : 'top-2 sm:top-4'}`}>
+          <div className={`bg-black/70 rounded-full shadow-lg ${isPip ? 'px-2.5 py-1' : 'px-4 sm:px-5 py-1.5 sm:py-2'}`}>
+            <span className={`text-white font-bold ${isPip ? 'text-[11px]' : 'text-sm sm:text-lg'}`}>{speedOverlayValue}</span>
           </div>
         </div>
       )}
 
       {/* Open File Button - Top Left (shows/hides with controls) */}
-      {onFileSelect && (
+      {onFileSelect && !isPip && (
         <button
           onClick={handleOpenFileDialog}
           className={`absolute left-2 sm:left-4 top-2 sm:top-4 z-30 bg-black/70 hover:bg-black/80 text-white p-1.5 sm:p-2 rounded-full transition-all duration-300 hover:scale-110 group active:scale-95 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
@@ -1125,12 +1419,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </button>
       )}
 
-      {/* Overlay Animations */}
-      <ActionOverlay overlayState={overlayState} />
+      {/* Overlay Animations — same behaviour in the mini-player as at full size,
+          just scaled down: the pill shows and the surrounding chrome gets out of
+          its way (PipOverlay hides itself on the same signal). */}
+      <ActionOverlay overlayState={overlayState} compact={isPip} />
 
       {/* Resume prompt (MX Player–style): video already continues from where it
           was left; this lets the user jump back to the start. Auto-hides after 5s. */}
-      {resumeFrom !== null && (
+      {resumeFrom !== null && !isPip && (
         <div className="absolute right-3 sm:right-4 bottom-20 sm:bottom-24 z-30 animate-fade-in pointer-events-auto">
           <button
             onClick={handleStartOver}
@@ -1143,7 +1439,44 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
+      {/* Mini-player surface — replaces the full chrome entirely while in PiP.
+          A 450px window can't carry the settings menu, queue and track pickers,
+          so PiP gets its own purpose-built controls instead of a squeezed copy. */}
+      {isPip && (
+        <PipOverlay
+          title={playlistInfo?.[currentPlaylistIndex ?? 0]?.name}
+          isPlaying={isPlaying}
+          currentTime={currentTime}
+          duration={duration}
+          volume={volume}
+          isMuted={isMuted}
+          isPinned={isPipPinned}
+          hasNext={hasNext}
+          hasPrev={hasPrev}
+          actionSignal={overlayState.id}
+          onPlayPause={togglePlay}
+          onSkip={(s) => skip(s, false)}
+          onSeek={(t) => { setCurrentTime(t); if (videoRef.current) videoRef.current.currentTime = t; }}
+          onSeekStart={handleSeekStart}
+          onSeekEnd={() => { setIsDragging(false); containerRef.current?.focus(); }}
+          onVolume={(v) => handleVolumeChange(v, false, false)}
+          onToggleMute={() => {
+            if (!videoRef.current) return;
+            const next = !isMuted;
+            videoRef.current.muted = next;
+            setIsMuted(next);
+            triggerOverlay(next ? 'volume-down' : 'volume-up', next ? 'Muted' : 'Unmuted');
+          }}
+          onTogglePin={togglePipPin}
+          onExpand={togglePip}
+          onClose={() => { videoRef.current?.pause(); setIsPlaying(false); togglePip(); }}
+          onNext={onNext}
+          onPrev={onPrev}
+        />
+      )}
+
       {/* Bottom Controls */}
+      {!isPip && (
       <PlayerControls
         isPlaying={isPlaying}
         currentTime={currentTime}
@@ -1154,7 +1487,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         playbackSpeed={playbackSpeed}
         hasSubtitles={!!subtitlesSrc}
         subtitlesEnabled={subtitlesEnabled}
-        isLooping={isLooping}
+        loopMode={loopMode}
+        hasQueueToLoop={hasQueue}
         onPlayPause={togglePlay}
         onSeek={handleSeekChange}
         onSeekStart={handleSeekStart}
@@ -1183,20 +1517,23 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onToggleQueue={playlistInfo && playlistInfo.length > 1 ? () => setShowQueue(q => !q) : undefined}
         showQueue={showQueue}
       />
+      )}
 
       {/* Queue Panel */}
-      {showQueue && playlistInfo && playlistInfo.length > 1 && (
+      {showQueue && !isPip && playlistInfo && playlistInfo.length > 1 && (
         <QueuePanel
           playlist={playlistInfo}
           currentIndex={currentPlaylistIndex ?? 0}
           onJumpTo={onJumpTo ?? (() => {})}
           onReorder={onReorderPlaylist ?? (() => {})}
           onClose={() => setShowQueue(false)}
+          onSaveQueue={onSaveQueue}
+          alreadySaved={queueSaved}
         />
       )}
 
       {/* In-player download progress ring (background download from "Watch now") */}
-      {downloadProgress && (() => {
+      {downloadProgress && !isPip && (() => {
         const pct = downloadProgress.total ? Math.min(100, Math.round((downloadProgress.bytes / downloadProgress.total) * 100)) : 0;
         const r = 9; const circ = 2 * Math.PI * r;
         return (
@@ -1217,7 +1554,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {trackMenu && <div className="fixed inset-0 z-30" onClick={() => setTrackMenu(null)} />}
 
       {/* Audio + Subtitle track menus — mpv exposes embedded tracks (WebView couldn't). */}
-      {(() => {
+      {!isPip && (() => {
         const audioTracks = tracks.filter(t => t.type === 'audio');
         const subTracks = tracks.filter(t => t.type === 'sub');
         if (audioTracks.length < 2 && subTracks.length === 0) return null;
@@ -1271,7 +1608,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       })()}
 
       {/* Library Button (visible when controls are shown, including fullscreen) */}
-      {showLibraryButton && onOpenLibrary && (
+      {showLibraryButton && onOpenLibrary && !isPip && (
         <button
           onClick={onOpenLibrary}
           className={`absolute top-2 right-2 sm:top-4 sm:right-4 z-40 bg-black/60 hover:bg-black/70 text-white p-1.5 sm:p-2 rounded-full transition-all duration-300 active:scale-95 ${

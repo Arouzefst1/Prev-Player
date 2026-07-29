@@ -41,7 +41,10 @@ WebView2 is bundled — no extra software needed.
 - **Subtitles** — VTT and SRT support
 - **Playback speed** — 0.25× to 2×
 - **Keyboard shortcuts** — Space/K (play/pause), J/L (skip), F (fullscreen), M (mute), C (subtitles)
-- **Picture-in-Picture** — native PiP with fullscreen restore on return
+- **Picture-in-Picture** — true floating mini-player: shaped to the video's aspect ratio,
+  always-on-top, drag to move, snaps to screen corners, aspect-locked resize, its own
+  compact controls (play/pause, ±10s, scrubber, volume, pin) and full keyboard control.
+  Remembers its size and spot; restores the previous window state on the way out
 - **Queue panel** — drag-to-reorder the current playlist while playing
 - **Auto-updater** — notified on launch when a new version is available
 

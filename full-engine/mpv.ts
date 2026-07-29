@@ -11,7 +11,7 @@
 // ===========================================================================
 
 import {
-  init, destroy, command, setProperty, observeProperties,
+  init, destroy, command, setProperty, getProperty, observeProperties,
   type MpvConfig,
 } from 'tauri-plugin-mpv-api';
 
@@ -229,6 +229,40 @@ export async function mpvSetAudioTrack(id: number): Promise<void> {
 export async function mpvSetSubtitleTrack(id: number | null): Promise<void> {
   if (!(await ready())) return;
   await setProperty('sid', (id === null ? 'no' : id) as any);
+}
+
+/**
+ * Ask mpv for the picture's display aspect RIGHT NOW, instead of waiting to be told.
+ *
+ * `dwidth`/`dheight` are observed properties, so they only push on CHANGE. If mpv
+ * settled on them before we subscribed — or a given file/codec path simply never
+ * fires them — `state.videoAspect` sits at null forever, PiP falls back to its
+ * 16:9 guess, and a portrait clip ends up pillarboxed inside a landscape window.
+ * Querying directly closes that gap, with two fallbacks for good measure.
+ */
+export async function mpvFetchVideoAspect(): Promise<number | null> {
+  if (!(await ready())) return null;
+  const num = async (name: string): Promise<number> => {
+    try {
+      const v = await getProperty<number>(name);
+      return typeof v === 'number' && isFinite(v) ? v : 0;
+    } catch { return 0; }
+  };
+  const pairs: [string, string][] = [
+    ['dwidth', 'dheight'],                 // display size — honours anamorphic
+    ['video-params/dw', 'video-params/dh'],
+    ['width', 'height'],                   // raw decoded size
+  ];
+  for (const [wName, hName] of pairs) {
+    const [w, h] = [await num(wName), await num(hName)];
+    if (w > 0 && h > 0) {
+      _dw = w; _dh = h;
+      state.videoAspect = w / h;
+      emit();
+      return state.videoAspect;
+    }
+  }
+  return null;
 }
 
 export async function mpvSetPaused(paused: boolean): Promise<void> {

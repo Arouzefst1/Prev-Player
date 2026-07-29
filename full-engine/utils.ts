@@ -419,3 +419,27 @@ export const videoOrderStore = {
     try { localStorage.setItem(STORAGE_VIDEO_ORDER, JSON.stringify(ids)); } catch {}
   },
 };
+
+// ==========================================================================
+// Keyboard routing
+// ==========================================================================
+
+/**
+ * Is the keystroke destined for a text field rather than the app's shortcuts?
+ *
+ * Player shortcuts are bound to `window`, so anything typed anywhere reaches
+ * them — without this, space would both type a space AND toggle playback.
+ * Range inputs are deliberately NOT treated as typing: the seek bar and volume
+ * slider are player controls, and arrow keys should keep driving the player.
+ */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  if (el.tagName === 'INPUT') {
+    const type = (el as HTMLInputElement).type;
+    return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(type);
+  }
+  return false;
+}

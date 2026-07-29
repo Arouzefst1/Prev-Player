@@ -247,6 +247,14 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
+      /* The "1" badge pops in when repeat-one is picked (queue only). */
+      @keyframes loopOnePop {
+        0% { transform: scale(0); opacity: 0; }
+        60% { transform: scale(1.25); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      .loop-one-pop { animation: loopOnePop 0.35s cubic-bezier(0.34, 1.4, 0.64, 1); transform-origin: center; }
+
       /* Progress ring pulse glow for loading indicator (Fix #6) */
       @keyframes progressPulse {
         0%, 100% { filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.3)); }

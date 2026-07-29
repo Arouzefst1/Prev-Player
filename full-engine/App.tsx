@@ -1,6 +1,7 @@
-﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
+﻿import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Update } from '@tauri-apps/plugin-updater';
 import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight, RefreshCw, Share2, Settings } from 'lucide-react';
+import { isTypingTarget } from './utils';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
 import ShareModal from './components/ShareModal';
@@ -104,6 +105,11 @@ function App() {
   const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
   const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
   const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
+  // Live mirrors of the queue state. playNext/playPrev/jumpTo are invoked from a
+  // ref held inside the player, so they can't rely on render-time closures.
+  const playlistRef = useRef<PlaylistItem[]>([]);
+  const currentIndexRef = useRef(0);
+  const isPlaylistLoopingRef = useRef(false);
   const [updateBanner, setUpdateBanner] = useState<{ version: string; notes?: string } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'downloading' | 'installing' | 'error'>('idle');
   const [updateProgress, setUpdateProgress] = useState(0); // 0–100, –1 = indeterminate
@@ -798,12 +804,24 @@ function App() {
   const addToQueue = useCallback(async (video: VideoMeta) => {
     const { convertFileSrc } = await import('@tauri-apps/api/core');
     const item: PlaylistItem = { id: video.id, src: convertFileSrc(video.path), path: video.path, name: video.name, thumbnail: video.thumbnail };
-    setPlaylist(prev => {
-      if (prev.some(p => p.id === video.id)) { showToast('Already in queue'); return prev; }
-      if (prev.length === 0) { setCurrentIndex(0); setWasPlayingBeforeLibrary(true); showToast(`Playing “${video.name}”`); return [item]; }
-      showToast(`Added to queue (${prev.length + 1})`);
-      return [...prev, item];
-    });
+    // Decide from the live queue and then apply. React may invoke a state updater
+    // more than once, so setCurrentIndex/showToast must not live inside one —
+    // appending must never disturb the position you're already playing from.
+    const prev = playlistRef.current;
+    if (prev.some(p => p.id === video.id)) { showToast('Already in queue'); return; }
+    if (prev.length === 0) {
+      playlistRef.current = [item];
+      currentIndexRef.current = 0;
+      setPlaylist([item]);
+      setCurrentIndex(0);
+      setWasPlayingBeforeLibrary(true);
+      showToast(`Playing “${video.name}”`);
+      return;
+    }
+    const next = [...prev, item];
+    playlistRef.current = next;
+    setPlaylist(next);
+    showToast(`Added to queue (${next.length})`);
   }, [showToast]);
 
   // Save an explicit set of video IDs as a named folder (WebView2 lacks
@@ -819,10 +837,42 @@ function App() {
   const saveIdsAsFolderRef = useRef(saveIdsAsFolder);
   useEffect(() => { saveIdsAsFolderRef.current = saveIdsAsFolder; }, [saveIdsAsFolder]);
 
+  // Bookmark the queue straight from the queue panel, under a name the user typed.
+  // We remember WHICH videos were saved (membership, not order) so the panel stops
+  // offering to save the same queue over and over — adding or removing one brings
+  // the offer back, reordering doesn't.
+  const [savedQueueSig, setSavedQueueSig] = useState<string | null>(null);
+  // Set when the queue was launched straight from a library folder; while the
+  // queue still matches it, there is nothing worth bookmarking.
+  const [queueOriginSig, setQueueOriginSig] = useState<string | null>(null);
+  const queueSignature = useMemo(
+    () => playlist.map(p => p.id).sort().join('|'),
+    [playlist],
+  );
+  const queueSaved = savedQueueSig !== null && savedQueueSig === queueSignature;
+  const queueIsUntouchedFolder = queueOriginSig !== null && queueOriginSig === queueSignature;
+
+  const saveQueueAsFolder = useCallback(async (name: string) => {
+    const ids = playlist.map(p => p.id);
+    if (ids.length === 0) return;
+    const { folderStore } = await import('./utils');
+    const folderName = name.trim() || 'Untitled queue';
+    folderStore.save({ id: genId(), name: folderName, videoIds: ids, createdAt: Date.now() });
+    setVideoLibrary(prev => [...prev]); // nudge folders re-render
+    setSavedQueueSig([...ids].sort().join('|'));
+    showToast(`Saved “${folderName}” to Folders`, {
+      label: 'Open',
+      run: () => { setShowLibrary(true); },
+    });
+  }, [playlist, showToast]);
+
   // Play an entire folder/playlist, optionally starting at a specific index
   const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean, startIndex = 0) => {
     if (videoIds.length === 0) return;
     setIsPlaylistLooping(loop);
+    // This queue IS a library folder — there's nothing to bookmark until the
+    // user adds something to it. (Membership, so shuffling doesn't count.)
+    setQueueOriginSig([...videoIds].sort().join('|'));
 
     let ids = [...videoIds];
     if (shuffle) {
@@ -872,21 +922,54 @@ function App() {
   // ---------------------------------------------------------------------------
   // Playlist navigation
   // ---------------------------------------------------------------------------
-  const playNext = () => {
-    isFullscreenRef.current = !!document.fullscreenElement;
-    if (currentIndex < playlist.length - 1) { setCurrentIndex(i => i + 1); setWasPlayingBeforeLibrary(true); }
-    else if (isPlaylistLooping && playlist.length > 0) { setCurrentIndex(0); setWasPlayingBeforeLibrary(true); }
-  };
+  useEffect(() => {
+    playlistRef.current = playlist;
+    currentIndexRef.current = currentIndex;
+    isPlaylistLoopingRef.current = isPlaylistLooping;
+  });
 
-  const playPrev = () => {
-    isFullscreenRef.current = !!document.fullscreenElement;
-    if (currentIndex > 0) { setCurrentIndex(i => i - 1); setWasPlayingBeforeLibrary(true); }
-  };
+  // Safety net: never leave the index pointing past the end of the queue (a
+  // removal, or any future advance bug, would otherwise render an undefined item).
+  useEffect(() => {
+    if (playlist.length > 0 && currentIndex > playlist.length - 1) {
+      setCurrentIndex(playlist.length - 1);
+    }
+  }, [playlist.length, currentIndex]);
 
-  const jumpTo = (index: number) => {
+  // These are driven from the player's end-of-file callback, which holds them in
+  // a ref — so they must never depend on values captured at render time. Reading
+  // the queue and position from refs (and writing the position back immediately)
+  // means two calls in the same tick can't both pass a stale bounds check and
+  // advance twice, and the index can never run past the end of the queue.
+  const playNext = useCallback(() => {
     isFullscreenRef.current = !!document.fullscreenElement;
-    if (index >= 0 && index < playlist.length) { setCurrentIndex(index); setWasPlayingBeforeLibrary(true); }
-  };
+    const len = playlistRef.current.length;
+    const cur = currentIndexRef.current;
+    let next: number | null = null;
+    if (cur < len - 1) next = cur + 1;
+    else if (isPlaylistLoopingRef.current && len > 0) next = 0;
+    if (next === null) return;
+    currentIndexRef.current = next;
+    setCurrentIndex(next);
+    setWasPlayingBeforeLibrary(true);
+  }, []);
+
+  const playPrev = useCallback(() => {
+    isFullscreenRef.current = !!document.fullscreenElement;
+    const cur = currentIndexRef.current;
+    if (cur <= 0) return;
+    currentIndexRef.current = cur - 1;
+    setCurrentIndex(cur - 1);
+    setWasPlayingBeforeLibrary(true);
+  }, []);
+
+  const jumpTo = useCallback((index: number) => {
+    isFullscreenRef.current = !!document.fullscreenElement;
+    if (index < 0 || index >= playlistRef.current.length) return;
+    currentIndexRef.current = index;
+    setCurrentIndex(index);
+    setWasPlayingBeforeLibrary(true);
+  }, []);
 
   const handleReorderPlaylist = useCallback((reordered: { id: string; name: string; thumbnail?: string }[]) => {
     const currentId = playlist[currentIndex]?.id;
@@ -934,6 +1017,59 @@ function App() {
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [handleGoHome]);
+
+  // ---------------------------------------------------------------------------
+  // Fullscreen escape hatch for the home screen.
+  //
+  // f / Esc / double-click all live inside VideoPlayer, so going home while
+  // fullscreen unmounts every way out and traps the window — there's no title
+  // bar to reach either. These handlers take over exactly when the player isn't
+  // mounted, so they can never double-toggle against the player's own.
+  // ---------------------------------------------------------------------------
+  const setWindowFullscreen = useCallback(async (next: boolean | 'toggle') => {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      const isFs = await win.isFullscreen();
+      const target = next === 'toggle' ? !isFs : next;
+      if (target !== isFs) await win.setFullscreen(target);
+      isFullscreenRef.current = target;
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (playlist.length > 0) return; // the player owns these keys while mounted
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target)) return;
+      if (e.key === 'Escape') {
+        setWindowFullscreen(false);
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        setWindowFullscreen('toggle');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [playlist.length, setWindowFullscreen]);
+
+  // Double-click anywhere on the home screen toggles fullscreen, matching the
+  // player. WebView2 reports e.detail as 1 even on the second click, so the two
+  // clicks are timed rather than counted (same approach as VideoPlayer).
+  const lastHomeClickRef = useRef(0);
+  const handleHomeClick = useCallback((e: React.MouseEvent) => {
+    if (playlist.length > 0) return;
+    // Only empty space toggles — double-clicking a button, card or field should
+    // do what that control does, not resize the window out from under it.
+    const el = e.target as HTMLElement | null;
+    if (el?.closest('button, a, input, select, textarea, label, [role="button"]')) return;
+    const now = Date.now();
+    if (now - lastHomeClickRef.current < 300) {
+      lastHomeClickRef.current = 0;
+      setWindowFullscreen('toggle');
+    } else {
+      lastHomeClickRef.current = now;
+    }
+  }, [playlist.length, setWindowFullscreen]);
 
   // Fallback: if the WebView reloads for any other reason, save the position and
   // dispatch a stop to the (still-running) mpv process on the way out so audio
@@ -998,7 +1134,10 @@ function App() {
   const isUpdating = updateStatus === 'downloading' || updateStatus === 'installing';
 
   return (
-    <div className={`w-screen h-screen ${playlist.length > 0 ? 'bg-transparent' : 'bg-neutral-900'} text-white overflow-hidden flex flex-col font-sans`}>
+    <div
+      className={`w-screen h-screen ${playlist.length > 0 ? 'bg-transparent' : 'bg-neutral-900'} text-white overflow-hidden flex flex-col font-sans`}
+      onClick={handleHomeClick}
+    >
       {/* Update dialog — modal, shown once when a newer version is found */}
       {updateBanner && (
         <div className="fixed inset-0 z-[300] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 animate-[fadeIn_0.2s_ease]">
@@ -1076,6 +1215,11 @@ function App() {
               resumeEnabled={settings.resumePlayback}
               defaultVolume={settings.defaultVolume}
               defaultSpeed={settings.defaultSpeed}
+              pipAutoplayQueue={settings.pipAutoplayQueue}
+              playlistLooping={isPlaylistLooping}
+              onPlaylistLoopChange={setIsPlaylistLooping}
+              onSaveQueue={queueIsUntouchedFolder ? undefined : saveQueueAsFolder}
+              queueSaved={queueSaved}
               onEnded={settings.autoplayNext ? playNext : undefined}
               onChangeVideo={openLibrary}
               onFileSelect={handleOpenFilesViaDialog}

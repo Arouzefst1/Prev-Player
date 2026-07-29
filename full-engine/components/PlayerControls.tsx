@@ -3,6 +3,7 @@ import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings, Captions, 
 import { formatTime } from '../utils';
 import { useSettings } from '../settings';
 import SpeedPanel from './SpeedPanel';
+import LoopButton, { type LoopMode } from './LoopButton';
 
 interface PlayerControlsProps {
   isPlaying: boolean;
@@ -14,7 +15,10 @@ interface PlayerControlsProps {
   playbackSpeed: number;
   hasSubtitles: boolean;
   subtitlesEnabled: boolean;
-  isLooping: boolean;
+  /** off → play once; all → repeat the queue; one → repeat this video. */
+  loopMode: LoopMode;
+  /** A queue exists, so the loop button offers all three modes. */
+  hasQueueToLoop?: boolean;
   onPlayPause: () => void;
   onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onSeekStart: () => void;
@@ -50,7 +54,8 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   playbackSpeed,
   hasSubtitles,
   subtitlesEnabled,
-  isLooping,
+  loopMode,
+  hasQueueToLoop,
   onPlayPause,
   onSeek,
   onSeekStart,
@@ -261,37 +266,9 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </div>
           </div>
 
-          {/* Loop Button - Next to Volume */}
-          <button
-            onClick={onToggleLoop}
-            className={`p-1 transition-all duration-300 active:scale-95 relative ${
-              isLooping 
-                ? 'text-red-500' 
-                : 'text-white/50 hover:text-white'
-            }`}
-            title={isLooping ? 'Loop: On' : 'Loop: Off'}
-          >
-            <svg 
-              width="20" 
-              height="20" 
-              viewBox="0 0 24 24" 
-              fill="none" 
-              stroke="currentColor" 
-              strokeWidth="2" 
-              strokeLinecap="round" 
-              strokeLinejoin="round"
-              className={`sm:w-6 sm:h-6 transition-transform duration-500 ${isLooping ? 'rotate-0' : 'rotate-180'}`}
-            >
-              <path d="M17 2l4 4-4 4" />
-              <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
-              <path d="M7 22l-4-4 4-4" />
-              <path d="M21 13v1a4 4 0 0 1-4 4H3" />
-            </svg>
-            {/* Active indicator dot */}
-            {isLooping && (
-              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-            )}
-          </button>
+          {/* Loop — plain on/off for a single video; cycles off → repeat queue
+              → repeat one once there's a queue to repeat (see LoopButton). */}
+          <LoopButton mode={loopMode} hasQueue={!!hasQueueToLoop} onCycle={onToggleLoop} size={22} />
 
           {/* Time Display - Next to Volume */}
           <button 

@@ -38,6 +38,15 @@
     "core:window:allow-set-decorations",
     "core:window:allow-set-resizable",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-min-size",
+    "core:window:allow-set-max-size",
+    "core:window:allow-set-shadow",
+    "core:window:allow-is-maximized",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-available-monitors",
+    "core:window:allow-primary-monitor",
     "mpv:default"
   ]
 }

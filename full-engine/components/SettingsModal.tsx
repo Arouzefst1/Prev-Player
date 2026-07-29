@@ -1,5 +1,8 @@
-import React from 'react';
-import { X, Settings as SettingsIcon, FolderOpen, RotateCcw } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  X, Settings as SettingsIcon, FolderOpen, RotateCcw,
+  SlidersHorizontal, Play, PictureInPicture2, Download,
+} from 'lucide-react';
 import { AppSettings } from '../settings';
 
 interface SettingsModalProps {
@@ -8,6 +11,17 @@ interface SettingsModalProps {
   settings: AppSettings;
   onChange: (patch: Partial<AppSettings>) => void;
 }
+
+type SectionId = 'general' | 'playback' | 'pip' | 'downloads';
+
+const SECTION_ORDER: SectionId[] = ['general', 'playback', 'pip', 'downloads'];
+
+const SECTION_META: Record<SectionId, { title: string; desc: string; Icon: React.ElementType }> = {
+  general:   { title: 'General',            desc: 'Library layout and what happens when you add videos', Icon: SlidersHorizontal },
+  playback:  { title: 'Playback',           desc: 'How videos start, resume, and move through a queue',  Icon: Play },
+  pip:       { title: 'Picture-in-Picture', desc: 'Behaviour and geometry of the floating mini player',  Icon: PictureInPicture2 },
+  downloads: { title: 'Downloads & updates', desc: 'Where files land and when to look for new versions', Icon: Download },
+};
 
 // A small iOS-style on/off switch.
 const Toggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> = ({ checked, onChange }) => (
@@ -34,8 +48,77 @@ const Row: React.FC<{ title: string; desc: string; children: React.ReactNode }> 
   </div>
 );
 
+/**
+ * The expand affordance: a plus whose vertical stroke collapses into a minus as
+ * the section opens, with the whole glyph rotating a quarter turn so the change
+ * reads as one motion rather than an icon swap.
+ */
+const PlusMinus: React.FC<{ open: boolean }> = ({ open }) => (
+  <svg
+    width="16" height="16" viewBox="0 0 16 16"
+    stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+    className={`transition-transform duration-300 ease-out ${open ? 'rotate-90' : 'rotate-0'}`}
+  >
+    <line x1="3" y1="8" x2="13" y2="8" />
+    <line
+      x1="8" y1="3" x2="8" y2="13"
+      className="transition-transform duration-300 ease-out origin-center"
+      style={{ transform: open ? 'scaleY(0)' : 'scaleY(1)' }}
+    />
+  </svg>
+);
+
+/** Collapsible card. Height animates via the 0fr→1fr grid trick — no fixed max-height to guess. */
+const Section: React.FC<{
+  id: SectionId;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}> = ({ id, open, onToggle, children }) => {
+  const { title, desc, Icon } = SECTION_META[id];
+  return (
+    <div className={`rounded-xl border transition-colors duration-200 ${open ? 'border-neutral-700 bg-neutral-900/40' : 'border-neutral-800 hover:border-neutral-700'}`}>
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full flex items-center gap-3 px-3.5 py-3 text-left group"
+      >
+        <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${open ? 'bg-red-600/15 text-red-400' : 'bg-neutral-800 text-neutral-400 group-hover:text-neutral-200'}`}>
+          <Icon size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-white">{title}</div>
+          <div className="text-xs text-neutral-500 mt-0.5 leading-snug truncate">{desc}</div>
+        </div>
+        <span className={`flex-shrink-0 transition-colors ${open ? 'text-red-400' : 'text-neutral-500 group-hover:text-neutral-300'}`}>
+          <PlusMinus open={open} />
+        </span>
+      </button>
+
+      <div className={`grid transition-all duration-300 ease-out ${open ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+        <div className="overflow-hidden">
+          <div className="px-3.5 pb-1 pt-0 border-t border-neutral-800/70 divide-y divide-neutral-800/60">
+            {children}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, onChange }) => {
+  // Everything starts collapsed so the modal opens as a clean list of topics.
+  const [openSections, setOpenSections] = useState<Record<SectionId, boolean>>({
+    general: false, playback: false, pip: false, downloads: false,
+  });
   if (!open) return null;
+
+  const allOpen = SECTION_ORDER.every(id => openSections[id]);
+  const toggleAll = () => {
+    const next = !allOpen;
+    setOpenSections({ general: next, playback: next, pip: next, downloads: next });
+  };
+  const toggle = (id: SectionId) => setOpenSections(s => ({ ...s, [id]: !s[id] }));
 
   // Pick a folder for downloaded/received videos.
   const chooseDownloadFolder = async () => {
@@ -71,11 +154,24 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
           </button>
         </div>
 
+        {/* expand-all bar */}
+        <div className="flex items-center justify-between px-5 py-2.5 border-b border-neutral-800/70">
+          <span className="text-[11px] font-semibold text-neutral-500 uppercase tracking-[0.15em]">
+            {SECTION_ORDER.length} categories
+          </span>
+          <button
+            onClick={toggleAll}
+            className="flex items-center gap-1.5 text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800/80 hover:bg-neutral-700 rounded-lg px-2.5 py-1.5 transition-colors active:scale-95"
+          >
+            <PlusMinus open={allOpen} />
+            {allOpen ? 'Collapse all' : 'Expand all'}
+          </button>
+        </div>
+
         {/* body */}
-        <div className="p-5 overflow-auto custom-scrollbar divide-y divide-neutral-800/70">
-          {/* Library */}
-          <div className="pb-1">
-            <p className="text-[11px] font-semibold text-neutral-500 uppercase tracking-[0.15em] mb-1">Library</p>
+        <div className="p-4 overflow-auto custom-scrollbar flex flex-col gap-2.5">
+          {/* General */}
+          <Section id="general" open={openSections.general} onToggle={() => toggle('general')}>
             <Row title="Play videos when added" desc="Start playing right away when you add videos to the library.">
               <Toggle checked={settings.playOnAdd} onChange={(v) => onChange({ playOnAdd: v })} />
             </Row>
@@ -95,11 +191,10 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
             <Row title="Remember last video" desc="Show a “Resume Watching” card on the home screen.">
               <Toggle checked={settings.rememberLastVideo} onChange={(v) => onChange({ rememberLastVideo: v })} />
             </Row>
-          </div>
+          </Section>
 
           {/* Playback */}
-          <div className="py-1">
-            <p className="text-[11px] font-semibold text-neutral-500 uppercase tracking-[0.15em] mb-1 mt-3">Playback</p>
+          <Section id="playback" open={openSections.playback} onToggle={() => toggle('playback')}>
             <Row title="Autoplay next" desc="Automatically play the next video in a playlist or queue.">
               <Toggle checked={settings.autoplayNext} onChange={(v) => onChange({ autoplayNext: v })} />
             </Row>
@@ -135,11 +230,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
                 ))}
               </select>
             </Row>
-          </div>
+          </Section>
+
+          {/* Picture-in-Picture */}
+          <Section id="pip" open={openSections.pip} onToggle={() => toggle('pip')}>
+            <Row title="Keep the queue playing" desc="When the mini player is open, roll on to the next video in the queue. Turn off to stop on the last frame instead.">
+              <Toggle checked={settings.pipAutoplayQueue} onChange={(v) => onChange({ pipAutoplayQueue: v })} />
+            </Row>
+          </Section>
 
           {/* Downloads & updates */}
-          <div className="py-1">
-            <p className="text-[11px] font-semibold text-neutral-500 uppercase tracking-[0.15em] mb-1 mt-3">Downloads &amp; updates</p>
+          <Section id="downloads" open={openSections.downloads} onToggle={() => toggle('downloads')}>
             <div className="py-3">
               <div className="text-sm font-medium text-white">Download folder</div>
               <div className="text-xs text-neutral-500 mt-0.5 leading-snug">Where received &amp; downloaded videos are saved.</div>
@@ -168,7 +269,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
             <Row title="Check for updates on launch" desc="Look for a newer version automatically at startup.">
               <Toggle checked={settings.autoCheckUpdates} onChange={(v) => onChange({ autoCheckUpdates: v })} />
             </Row>
-          </div>
+          </Section>
         </div>
       </div>
     </div>

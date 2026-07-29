@@ -14,6 +14,8 @@ export interface AppSettings {
   playOnAdd: boolean;
   /** Auto-advance to the next video in a playlist/queue when one ends. */
   autoplayNext: boolean;
+  /** Keep advancing through the queue while the mini-player (PiP) is open. */
+  pipAutoplayQueue: boolean;
   /** Resume videos from where you left off. */
   resumePlayback: boolean;
   /** Show the "Resume Watching" card on the home screen. */
@@ -35,6 +37,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   playOnAdd: false,
   autoplayNext: true,
+  pipAutoplayQueue: true,
   resumePlayback: true,
   rememberLastVideo: true,
   defaultView: 'list',
