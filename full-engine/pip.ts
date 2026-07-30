@@ -295,6 +295,11 @@ async function applyPipChrome(win: TauriWindow, ratio: number, mon: Monitor | nu
 
   await win.setDecorations(false);
   await win.setResizable(true);
+  // Windows 11 offers its Snap Layouts flyout (and snap-to-half on a drag toward
+  // the top) for any window carrying WS_MAXIMIZEBOX. That's how the mini-player
+  // was getting yanked into a split screen mid-drag. Dropping "maximizable"
+  // clears that style, so the flyout never appears and PiP can't be snapped.
+  await win.setMaximizable(false);
   await win.setAlwaysOnTop(true);
   // An undecorated window loses the OS drop shadow; ask for it back so the
   // mini-player reads as a floating panel and not a flat rectangle.
@@ -335,6 +340,7 @@ export async function exitPipWindow(prev: PrePipState | null): Promise<void> {
   const win = winApi.getCurrentWindow();
 
   await win.setAlwaysOnTop(false).catch(() => {});
+  await win.setMaximizable(true).catch(() => {}); // restore Snap Layouts
   await win.setMaxSize(null).catch(() => {});
   // Put the app's own floor back BEFORE resizing, so the window can grow again.
   await win.setMinSize(new winApi.LogicalSize(APP_MIN_W_LOGICAL, APP_MIN_H_LOGICAL)).catch(() => {});

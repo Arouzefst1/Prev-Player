@@ -16,6 +16,13 @@ export interface AppSettings {
   autoplayNext: boolean;
   /** Keep advancing through the queue while the mini-player (PiP) is open. */
   pipAutoplayQueue: boolean;
+  /**
+   * Whether the scroll wheel changes volume while the mini-player (PiP) is open.
+   * Off by default: the mini-player floats over other windows, so a stray scroll
+   * on the way past it shouldn't silently move the volume. (At full size the
+   * wheel always works — the pointer is over the video because you're watching it.)
+   */
+  pipScrollVolume: boolean;
   /** Resume videos from where you left off. */
   resumePlayback: boolean;
   /** Show the "Resume Watching" card on the home screen. */
@@ -38,6 +45,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   playOnAdd: false,
   autoplayNext: true,
   pipAutoplayQueue: true,
+  pipScrollVolume: false,
   resumePlayback: true,
   rememberLastVideo: true,
   defaultView: 'list',

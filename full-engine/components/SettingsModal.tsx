@@ -237,6 +237,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
             <Row title="Keep the queue playing" desc="When the mini player is open, roll on to the next video in the queue. Turn off to stop on the last frame instead.">
               <Toggle checked={settings.pipAutoplayQueue} onChange={(v) => onChange({ pipAutoplayQueue: v })} />
             </Row>
+            <Row title="Scroll to change volume" desc="Let the mouse wheel change volume in the mini player. Off by default — it floats over other windows, so a scroll aimed past it would move the volume. (At full size the wheel always works.)">
+              <Toggle checked={settings.pipScrollVolume} onChange={(v) => onChange({ pipScrollVolume: v })} />
+            </Row>
           </Section>
 
           {/* Downloads & updates */}

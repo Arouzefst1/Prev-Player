@@ -103,7 +103,7 @@ function App() {
   const [videoLibrary, setVideoLibrary] = useState<VideoMeta[]>([]);
   const [showLibrary, setShowLibrary] = useState(false);
   const [lastVideo, setLastVideo] = useState<VideoMeta | null>(null);
-  const [wasPlayingBeforeLibrary, setWasPlayingBeforeLibrary] = useState(true);
+  const [shouldAutoPlay, setShouldAutoPlay] = useState(true);
   const [isPlaylistLooping, setIsPlaylistLooping] = useState(false);
   // Live mirrors of the queue state. playNext/playPrev/jumpTo are invoked from a
   // ref held inside the player, so they can't rely on render-time closures.
@@ -437,7 +437,7 @@ function App() {
     // "Play videos when added").
     setPlaylist(playlistItems);
     setCurrentIndex(0);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
     setShowLibrary(false);
 
     // Selected several files at once → play them in order + offer to save as a folder.
@@ -624,7 +624,7 @@ function App() {
     setPlaylist([{ id: video.id, src, path: video.path, name: video.name, thumbnail: video.thumbnail }]);
     setCurrentIndex(0);
     setShowLibrary(false);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
   }, []);
 
   // Watch received shares by streaming their CDN URLs directly (no download).
@@ -634,7 +634,7 @@ function App() {
     setPlaylist(pl);
     setCurrentIndex(Math.min(startIndex, pl.length - 1));
     setShowLibrary(false);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
   }, []);
 
   // Open an already-owned library video by file name (used when a received share
@@ -698,7 +698,7 @@ function App() {
   const watchAndDownload = useCallback(async (items: { url: string; name: string; size?: number }[], dir: string, group?: { id: string; name: string }) => {
     if (items.length === 0) return;
     setPlaylist(items.map(it => ({ id: genId(), src: it.url, path: it.url, name: it.name })));
-    setCurrentIndex(0); setShowLibrary(false); setWasPlayingBeforeLibrary(true);
+    setCurrentIndex(0); setShowLibrary(false); setShouldAutoPlay(true);
     await startDownloads(items, dir, group);
   }, [startDownloads]);
 
@@ -814,7 +814,7 @@ function App() {
       currentIndexRef.current = 0;
       setPlaylist([item]);
       setCurrentIndex(0);
-      setWasPlayingBeforeLibrary(true);
+      setShouldAutoPlay(true);
       showToast(`Playing “${video.name}”`);
       return;
     }
@@ -894,7 +894,7 @@ function App() {
       setPlaylist(items);
       // On shuffle the start position is meaningless; otherwise honour the requested index
       setCurrentIndex(shuffle ? 0 : Math.min(startIndex, items.length - 1));
-      setWasPlayingBeforeLibrary(true);
+      setShouldAutoPlay(true);
       setShowLibrary(false);
     }
   }, [videoLibrary]);
@@ -907,17 +907,30 @@ function App() {
   // ---------------------------------------------------------------------------
   // Library open/close (pause/resume video)
   // ---------------------------------------------------------------------------
+  // Whether closing the library should start playback again. Kept in its own ref
+  // because the flag this used to read (`shouldAutoPlay`) also mirrors every live
+  // play-state change — mpv's echo of the pause below overwrote it within a tick, so
+  // the resume decision ended up reading "it was paused" every single time.
+  const resumeAfterLibraryRef = useRef(false);
+
   const openLibrary = useCallback(() => {
     const el = videoElRef.current;
-    if (el && !el.paused) { setWasPlayingBeforeLibrary(true); el.pause(); }
+    if (el) {
+      resumeAfterLibraryRef.current = !el.paused;
+      // Pause unconditionally. `el.paused` reports mpv's last echoed state, which
+      // lags a beat behind a just-issued play/pause — gating the pause on it let the
+      // video (and its audio) keep running behind the library.
+      el.pause();
+    }
     setShowLibrary(true);
   }, []);
 
   const closeLibrary = useCallback(() => {
     setShowLibrary(false);
     const el = videoElRef.current;
-    if (el && wasPlayingBeforeLibrary) el.play().catch(() => {});
-  }, [wasPlayingBeforeLibrary]);
+    if (el && resumeAfterLibraryRef.current) el.play().catch(() => {});
+    resumeAfterLibraryRef.current = false;
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Playlist navigation
@@ -951,7 +964,7 @@ function App() {
     if (next === null) return;
     currentIndexRef.current = next;
     setCurrentIndex(next);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
   }, []);
 
   const playPrev = useCallback(() => {
@@ -960,7 +973,7 @@ function App() {
     if (cur <= 0) return;
     currentIndexRef.current = cur - 1;
     setCurrentIndex(cur - 1);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
   }, []);
 
   const jumpTo = useCallback((index: number) => {
@@ -968,7 +981,7 @@ function App() {
     if (index < 0 || index >= playlistRef.current.length) return;
     currentIndexRef.current = index;
     setCurrentIndex(index);
-    setWasPlayingBeforeLibrary(true);
+    setShouldAutoPlay(true);
   }, []);
 
   const handleReorderPlaylist = useCallback((reordered: { id: string; name: string; thumbnail?: string }[]) => {
@@ -1210,7 +1223,7 @@ function App() {
                 return d ? { bytes: d.bytes, total: d.total } : null;
               })()}
               subtitlesSrc={playlist[currentIndex].subtitleSrc}
-              autoPlay={wasPlayingBeforeLibrary}
+              autoPlay={shouldAutoPlay}
               isAudio={isAudioPath(playlist[currentIndex].name)}
               resumeEnabled={settings.resumePlayback}
               defaultVolume={settings.defaultVolume}
@@ -1220,10 +1233,11 @@ function App() {
               onPlaylistLoopChange={setIsPlaylistLooping}
               onSaveQueue={queueIsUntouchedFolder ? undefined : saveQueueAsFolder}
               queueSaved={queueSaved}
+              inputSuspended={showLibrary || showSettings}
               onEnded={settings.autoplayNext ? playNext : undefined}
               onChangeVideo={openLibrary}
               onFileSelect={handleOpenFilesViaDialog}
-              onPlayStateChange={playing => setWasPlayingBeforeLibrary(playing)}
+              onPlayStateChange={playing => setShouldAutoPlay(playing)}
               onNext={playNext}
               onPrev={playPrev}
               hasNext={currentIndex < playlist.length - 1 || isPlaylistLooping}

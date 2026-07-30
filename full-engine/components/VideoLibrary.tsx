@@ -295,6 +295,14 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>(defaultView ?? 'list');
 
+  // A useState initialiser only runs on mount, so changing the library layout in
+  // Settings did nothing until this panel was closed and reopened. Re-sync when
+  // the setting itself changes — an in-session grid/list toggle still sticks,
+  // because this only fires when `defaultView` actually differs.
+  useEffect(() => {
+    if (defaultView) setViewMode(defaultView);
+  }, [defaultView]);
+
   // Videos tab — ordered list
   const [orderedVideos, setOrderedVideos] = useState<VideoMeta[]>([]);
 
@@ -501,6 +509,9 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const renderVideoCard = (video: VideoMeta) => (
     <div
       key={video.id}
+      // The whole card plays — the play badge is an affordance, not the only
+      // hit target. Action buttons stopPropagation so they don't also start it.
+      onClick={() => { if (!editMode) onPlayVideo(video); }}
       className="group relative rounded-lg overflow-hidden bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-red-600/20"
     >
       <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
@@ -511,17 +522,45 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
             <Play size={32} className="text-neutral-600" fill="currentColor" />
           </div>
         )}
-        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center">
-          <button
-            onClick={() => onPlayVideo(video)}
-            className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300 hover:bg-red-700"
-          >
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center pointer-events-none">
+          <div className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300">
             <Play size={20} className="text-white fill-white" />
-          </button>
+          </div>
         </div>
         {video.duration && (
           <div className="absolute bottom-1 right-1 bg-black/80 px-2 py-0.5 rounded text-xs text-white font-semibold">
             {formatTime(video.duration)}
+          </div>
+        )}
+
+        {/* Actions — same set as the list view (queue / share / delete). */}
+        {!editMode && (
+          <div className="absolute top-1 right-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+            {onAddToQueue && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onAddToQueue(video); }}
+                title="Add to queue"
+                className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+              >
+                <ListPlus size={14} />
+              </button>
+            )}
+            {onShareVideo && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onShareVideo(video); }}
+                title="Share"
+                className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+              >
+                <Share2 size={14} />
+              </button>
+            )}
+            <button
+              onClick={(e) => { e.stopPropagation(); onDeleteVideo(video.id); }}
+              title="Delete"
+              className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+            >
+              <Trash2 size={14} />
+            </button>
           </div>
         )}
       </div>
@@ -530,12 +569,6 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
           {video.name}
         </h3>
         <p className="text-xs text-neutral-500 mt-1">{formatFileSize(video.size)}</p>
-        <button
-          onClick={(e) => { e.stopPropagation(); onDeleteVideo(video.id); }}
-          className="absolute top-1 right-1 bg-red-600/0 hover:bg-red-600 p-1 rounded opacity-0 group-hover:opacity-100 transition-all duration-300"
-        >
-          <Trash2 size={14} className="text-white" />
-        </button>
       </div>
     </div>
   );
@@ -580,7 +613,14 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               <p className="text-neutral-400 text-sm mt-0.5">{folderVideos.length} videos</p>
             </div>
           </div>
+          {/* Same trio as the library root — Settings belongs here too, otherwise
+              it's unreachable without backing out of the folder first. */}
           <div className="flex items-center gap-1">
+            {onOpenSettings && (
+              <button onClick={onOpenSettings} title="Settings" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+                <Settings size={20} className="text-neutral-400 hover:text-white" />
+              </button>
+            )}
             {onGoHome && (
               <button onClick={onGoHome} title="Home" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
                 <Home size={22} className="text-neutral-400 hover:text-white" />
@@ -716,7 +756,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                         <Play size={32} className="text-neutral-600" fill="currentColor" />
                       </div>
                     )}
-                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center">
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center pointer-events-none">
                       <div className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300">
                         <Play size={20} className="text-white fill-white" />
                       </div>
@@ -727,6 +767,35 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                       </div>
                     )}
                     <div className="absolute top-1 left-1 bg-black/70 px-1.5 py-0.5 rounded text-xs text-neutral-300 font-mono">{i + 1}</div>
+
+                    {/* Actions — queue / share / remove from this folder. */}
+                    <div className="absolute top-1 right-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                      {onAddToQueue && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onAddToQueue(video); }}
+                          title="Add to queue"
+                          className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+                        >
+                          <ListPlus size={14} />
+                        </button>
+                      )}
+                      {onShareVideo && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onShareVideo(video); }}
+                          title="Share"
+                          className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+                        >
+                          <Share2 size={14} />
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeVideoFromFolder(video.id); }}
+                        title="Remove from folder"
+                        className="p-1.5 rounded-md bg-black/70 text-white hover:bg-red-600 transition-colors active:scale-90"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
                   </div>
                   <div className="p-2">
                     <h3 className="text-xs sm:text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">{video.name}</h3>

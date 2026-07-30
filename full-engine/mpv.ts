@@ -206,7 +206,9 @@ export async function mpvLoad(path: string, startSeconds = 0): Promise<void> {
   // applies it as it opens the file. Unlike a seek fired after load, this can never
   // be dropped. mpv >= 0.38 loadfile syntax: loadfile <url> <flags> <index> <options>.
   const loadArgs: (string | number)[] = startSeconds > 0
-    ? [path, 'replace', 0, `start=${Math.floor(startSeconds)}`]
+    // Keep sub-second precision — Math.floor() threw away up to a second on every
+    // resume, so "continue where I left off" always landed slightly early.
+    ? [path, 'replace', 0, `start=${startSeconds.toFixed(3)}`]
     : [path];
   // Retry: loading a network stream (or a cold engine) can transiently fail.
   await retry(() => command('loadfile', loadArgs) as Promise<unknown>, 3, 250);
@@ -263,6 +265,15 @@ export async function mpvFetchVideoAspect(): Promise<number | null> {
     }
   }
   return null;
+}
+
+/** The open file's real duration, straight from mpv (0 if unknown). */
+export async function mpvGetDuration(): Promise<number> {
+  if (!(await ready())) return 0;
+  try {
+    const v = await getProperty<number>('duration');
+    return typeof v === 'number' && isFinite(v) && v > 0 ? v : 0;
+  } catch { return 0; }
 }
 
 export async function mpvSetPaused(paused: boolean): Promise<void> {

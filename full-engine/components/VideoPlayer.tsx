@@ -11,7 +11,7 @@ import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
 import PipOverlay from './PipOverlay';
 import { nextLoopMode, type LoopMode } from './LoopButton';
-import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, isTypingTarget } from '../utils';
+import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, clearVideoProgress, isTypingTarget } from '../utils';
 import {
   enterPipWindow, exitPipWindow, reshapePipWindow, resolveAspect, activeMonitor,
   savePipPrefs, pipMinSize, pipMaxSize, fitToAspect, snapPosition,
@@ -20,7 +20,7 @@ import {
 import {
   initMpv, subscribeMpv, mpvLoad, mpvSetPaused, mpvSeekAbsolute, mpvSetVolume,
   mpvSetMuted, mpvSetSpeed, mpvSetLoop, mpvAddSubtitle, mpvSetSubtitleVisible,
-  mpvSetAudioTrack, mpvSetSubtitleTrack, mpvFetchVideoAspect,
+  mpvSetAudioTrack, mpvSetSubtitleTrack, mpvFetchVideoAspect, mpvGetDuration,
   type MpvState, type MpvTrack,
 } from '../mpv';
 import { settingsStore } from '../settings';
@@ -49,6 +49,23 @@ interface PlaylistItemInfo {
   id: string;
   name: string;
   thumbnail?: string;
+}
+
+/**
+ * Did this wheel event start inside something that scrolls (the queue list, a
+ * track menu…)? Those panels live inside the player, so their wheel events bubble
+ * up to it — without this check, scrolling the queue would also move the volume.
+ */
+function startedInScrollable(target: EventTarget | null, stopAt: HTMLElement | null): boolean {
+  let el = target as HTMLElement | null;
+  while (el && el !== stopAt) {
+    if (el.scrollHeight > el.clientHeight + 1) {
+      const overflowY = getComputedStyle(el).overflowY;
+      if (overflowY === 'auto' || overflowY === 'scroll') return true;
+    }
+    el = el.parentElement;
+  }
+  return false;
 }
 
 interface VideoPlayerProps {
@@ -100,6 +117,12 @@ interface VideoPlayerProps {
   onSaveQueue?: (name: string) => void;
   /** This exact set of videos was already saved — hide the save offer. */
   queueSaved?: boolean;
+  /**
+   * Stop the player answering global input (keyboard shortcuts, mouse back/forward
+   * buttons). Set while the library is covering the player so browsing can't seek
+   * or skip the video behind it.
+   */
+  inputSuspended?: boolean;
 }
 
 // ============================================================
@@ -286,6 +309,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onPlaylistLoopChange,
   onSaveQueue,
   queueSaved,
+  inputSuspended,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   // `videoRef` now points at an mpv-backed adapter instead of a <video> element.
@@ -298,6 +322,27 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const endedFiredRef = useRef<boolean>(false);
   /** Have we seen the CURRENT file actually playing yet? Guards stale eof ticks. */
   const endedArmedRef = useRef<boolean>(false);
+  /**
+   * The video id mpv is CONFIRMED to have open — set only once loadfile resolves.
+   *
+   * `videoIdRef` flips the instant the queue advances, but mpv keeps reporting the
+   * outgoing file's time/duration for several ticks after that. Saving against
+   * videoIdRef in that window filed the finished video's end position under the
+   * NEXT video's id, so the next clip resumed near its end and appeared to skip.
+   */
+  const progressIdRef = useRef<string | null>(null);
+  /**
+   * HARD CAP on queue advances: one per file load, full stop.
+   *
+   * `loadGenRef` ticks up every time we load a file; `advancedGenRef` records the
+   * generation we already advanced away from. Whatever fires a second end-of-file
+   * for the same load — a duplicated mpv subscription, a stale eof tick, a replayed
+   * snapshot — it cannot advance again. This is a structural guarantee rather than
+   * a race that has to be reasoned about, which is why the queue kept jumping past
+   * a video: two advances landed for a single ending.
+   */
+  const loadGenRef = useRef(0);
+  const advancedGenRef = useRef(-1);
   const lastTimeUiRef = useRef<number>(0); // throttles the on-screen time/seek-bar
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -351,6 +396,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [codecSupport, setCodecSupport] = useState<Record<string, boolean>>({});
   // MX Player–style resume prompt: the time (sec) we resumed from, or null when hidden.
   const [resumeFrom, setResumeFrom] = useState<number | null>(null);
+  /** Running target during a wheel burst, so fast scrolls don't collapse to one step. */
+  const wheelBurstRef = useRef({ at: 0, volume: 1 });
 
   // --- Effect: Codec Support Detection ---
   useEffect(() => {
@@ -370,6 +417,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // needs the live PiP state + preference rather than the values it closed over.
   const isPipRef = useRef(false);
   const pipAutoplayQueueRef = useRef(pipAutoplayQueue);
+  /** True while the library covers the player — global input is ignored. */
+  const inputSuspendedRef = useRef(false);
   // togglePip MUST keep a stable identity. App passes `onOpenLibrary` as an inline
   // arrow, so a new function arrives on every App render — depending on it directly
   // re-created togglePip constantly, which re-ran the keyboard effect and its
@@ -388,7 +437,19 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     onOpenLibraryRef.current = onOpenLibrary;
     showLibraryButtonRef.current = showLibraryButton;
     isAudioRef.current = isAudio;
+    inputSuspendedRef.current = !!inputSuspended;
   });
+
+  // An overlay (library / settings) just took over: drop any click gesture still in
+  // flight, so a deferred play/pause can't land underneath it.
+  useEffect(() => {
+    if (!inputSuspended) return;
+    if (singleClickTimerRef.current) {
+      clearTimeout(singleClickTimerRef.current);
+      singleClickTimerRef.current = null;
+    }
+    lastClickMsRef.current = 0;
+  }, [inputSuspended]);
 
   // --- Effect: Initialize the mpv engine + build the <video>-like adapter. ---
   useEffect(() => {
@@ -420,10 +481,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     videoRef.current = adapter;
     onVideoRef?.(adapter as any);
 
+    // LEAK FIX: the cleanup below used to capture `unsub` while it was still the
+    // no-op placeholder, because initMpv() hadn't resolved yet. React 18+ runs
+    // mount → cleanup → mount in StrictMode, so BOTH passes then resolved and
+    // subscribed, and the first subscription was never released. Two live
+    // subscribers meant every mpv tick was handled twice — including end-of-file,
+    // which is how a single ending could advance the queue two steps.
     let unsub = () => {};
+    let disposed = false;
     initMpv().then((ok) => {
       if (!ok) return; // not in Tauri (plain browser) — nothing to drive
-      unsub = subscribeMpv((s) => {
+      const off = subscribeMpv((s) => {
         const prevPaused = mpvStateRef.current.paused;
         mpvStateRef.current = s; // always exact — the adapter's getters read this
 
@@ -446,21 +514,27 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setSubId(s.subId);
         setVideoAspect(s.videoAspect);
 
+        // Only attribute a position to the file mpv has actually confirmed open,
+        // and only while that's still the video we're showing.
+        const trackedId = progressIdRef.current;
+        const canSave = !!trackedId && trackedId === videoIdRef.current
+          && s.currentTime > 0 && s.duration > 0;
+
         if (prevPaused !== s.paused) {
           onPlayStateChangeRef.current?.(!s.paused);
           // Capture the position the moment playback pauses (covers short views and
           // pausing right before leaving), not only on the 5s tick.
-          if (s.paused && videoIdRef.current && s.currentTime > 0 && s.duration > 0) {
+          if (s.paused && canSave) {
             lastProgressSaveRef.current = Date.now();
-            saveVideoProgress(videoIdRef.current, s.currentTime, s.duration);
+            saveVideoProgress(trackedId!, s.currentTime, s.duration);
           }
         }
 
         // Throttled resume-progress save (during playback).
         const now = Date.now();
-        if (now - lastProgressSaveRef.current > 5000 && videoIdRef.current && s.currentTime > 0 && s.duration > 0) {
+        if (canSave && now - lastProgressSaveRef.current > 5000) {
           lastProgressSaveRef.current = now;
-          saveVideoProgress(videoIdRef.current, s.currentTime, s.duration);
+          saveVideoProgress(trackedId!, s.currentTime, s.duration);
         }
 
         // End-of-file → advance the playlist (once per file). In the mini-player
@@ -481,28 +555,52 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           endedArmedRef.current = true;
           endedFiredRef.current = false;
         } else if (endedArmedRef.current && !endedFiredRef.current) {
-          const advance = !isPipRef.current || pipAutoplayQueueRef.current;
-          setIsPlaying(false);
-          setShowControls(true);
-          if (advance) {
-            endedFiredRef.current = true;
-            endedArmedRef.current = false;
-            onEndedRef.current?.();
+          // Hard check, in order of strictness:
+          //  1. this load hasn't already advanced (structural, can't be raced);
+          //  2. mpv has confirmed THIS file open, so it isn't a leftover tick;
+          //  3. the position really is at the end of THIS file — a stale tick
+          //     carries the previous file's time, which won't line up.
+          const alreadyAdvanced = advancedGenRef.current === loadGenRef.current;
+          const fileConfirmed = !!progressIdRef.current && progressIdRef.current === videoIdRef.current;
+          const atEnd = s.duration <= 0 || s.currentTime >= s.duration - 2;
+
+          if (alreadyAdvanced || !fileConfirmed || !atEnd) {
+            if (!alreadyAdvanced) {
+              console.warn(`[queue] ignoring end-of-file: confirmed=${fileConfirmed} atEnd=${atEnd} t=${s.currentTime.toFixed(1)} dur=${s.duration.toFixed(1)}`);
+            }
+          } else {
+            const advance = !isPipRef.current || pipAutoplayQueueRef.current;
+            setIsPlaying(false);
+            setShowControls(true);
+            if (advance) {
+              endedFiredRef.current = true;
+              endedArmedRef.current = false;
+              advancedGenRef.current = loadGenRef.current; // spend this load's one advance
+              onEndedRef.current?.();
+            }
           }
         }
       });
+      // If cleanup already ran while initMpv() was in flight, release immediately
+      // instead of leaving an orphaned subscriber behind.
+      if (disposed) { off(); return; }
+      unsub = off;
     });
 
     return () => {
+      disposed = true;
       unsub();
       onVideoRef?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Effect: Apply the user's default volume / speed once mpv is ready. ---
-  // mpv keeps these as global properties across files, so setting them once at
-  // startup makes every clip start at the chosen volume/speed.
+  // --- Effect: Apply the user's default volume / speed. ---
+  // mpv keeps these as global properties across files, so pushing them once is
+  // enough for every later clip. But that also meant a mount-only apply made the
+  // settings inert for the rest of the session — mpv simply kept whatever it was
+  // last told, so changing them didn't even affect the NEXT video. Re-running on
+  // change makes both settings take effect the moment they're adjusted.
   useEffect(() => {
     let cancelled = false;
     initMpv().then((ok) => {
@@ -515,8 +613,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setPlaybackSpeed(defaultSpeed);
     });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [defaultVolume, defaultSpeed]);
 
   // (Resume-from-last-position is handled inside the file-load effect below, right
   // after mpv has the file open — that's the only moment a seek reliably lands.)
@@ -534,6 +631,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     lastProgressSaveRef.current = 0;
     endedFiredRef.current = false;
     endedArmedRef.current = false; // re-arms only once the new file reports playing
+    progressIdRef.current = null;  // no saving until mpv confirms the new file
+    loadGenRef.current += 1;       // this load gets exactly one queue advance
     if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
     setResumeFrom(null);
     setHasError(false);
@@ -567,6 +666,26 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
       if (cancelled) return;
 
+      // mpv now definitively has THIS file open — safe to attribute positions to it.
+      progressIdRef.current = videoId ?? null;
+
+      // Sanity-check the resume point against the file's REAL duration. A stored
+      // position can't be trusted until now: an entry mis-attributed by an older
+      // build carries another video's time AND duration, so it looks perfectly
+      // consistent on its own yet lands past the end of THIS file — which opens it
+      // at EOF and instantly advances, skipping the video entirely.
+      if (startAt > 0) {
+        const realDuration = await mpvGetDuration();
+        if (cancelled) return;
+        if (realDuration > 0 && startAt >= realDuration - 10) {
+          console.warn(`[resume] stored position ${startAt.toFixed(1)}s doesn't fit this file (${realDuration.toFixed(1)}s) — restarting from 0`);
+          if (videoId) clearVideoProgress(videoId);
+          await mpvSeekAbsolute(0).catch(() => {});
+          setCurrentTime(0);
+          startAt = 0;
+        }
+      }
+
       // Offer "Start over" since we resumed partway in.
       if (startAt > 0) {
         setCurrentTime(startAt);
@@ -596,8 +715,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     const flush = () => {
       const s = mpvStateRef.current;
-      if (videoIdRef.current && s.currentTime > 0 && s.duration > 0) {
-        saveVideoProgress(videoIdRef.current, s.currentTime, s.duration);
+      const id = progressIdRef.current;
+      // Same gate as the live saves — never file a position against a video mpv
+      // isn't confirmed to have open.
+      if (id && id === videoIdRef.current && s.currentTime > 0 && s.duration > 0) {
+        saveVideoProgress(id, s.currentTime, s.duration);
       }
     };
     const onVisibilityChange = () => { if (document.hidden) flush(); };
@@ -713,6 +835,32 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
     if (showControls) resetControlsTimer();
   }, [volume, resetControlsTimer, triggerOverlay]);
+
+  /**
+   * Mouse wheel → volume, same 5% step as the ↑/↓ keys.
+   *
+   * At full size this is unconditional: the pointer is over the video because the
+   * user is watching it. In the mini-player it isn't — that window floats over
+   * everything, so a scroll aimed at whatever is underneath would move the volume
+   * by accident. There it's opt-in via Settings › Picture-in-Picture.
+   */
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (!e.deltaY) return;
+    if (inputSuspendedRef.current) return; // library / settings is in front
+    if (startedInScrollable(e.target, containerRef.current)) return;
+    if (isPip && !settingsStore.get().pipScrollVolume) return;
+
+    // A flick of the wheel fires several events before React re-renders, and mpv
+    // echoes the real volume back only afterwards — so a burst measured against
+    // `volume` would land one single step. Chain off the last value we asked for
+    // while the burst is live, and fall back to state once it goes quiet.
+    const now = Date.now();
+    const base = now - wheelBurstRef.current.at < 400 ? wheelBurstRef.current.volume : volume;
+    const target = Math.max(0, Math.min(1, base + (e.deltaY < 0 ? 0.05 : -0.05)));
+    wheelBurstRef.current = { at: now, volume: target };
+
+    handleVolumeChange(target, true, false);
+  }, [isPip, volume, handleVolumeChange]);
 
   const skip = useCallback((amount: number, showControlsBar = true) => {
     if (!videoRef.current) return;
@@ -1055,6 +1203,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore anything aimed at a text field (queue name box, search, …).
       if (isTypingTarget(e.target)) return;
+      // The library is in front of the player — browsing it must not drive playback.
+      if (inputSuspendedRef.current) return;
 
       // Prevent default for control keys
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
@@ -1187,6 +1337,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // without this, typing a space in a text field still toggled playback
       // (and preventDefault() below would have eaten the space entirely).
       if (isTypingTarget(e.target)) return;
+      if (inputSuspendedRef.current) return;
       if (e.code === 'Space') {
         e.preventDefault();
         
@@ -1272,6 +1423,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Mouse side buttons (back/forward) → previous/next video, or seek ±10s if none.
   useEffect(() => {
     const onMouseUp = (e: MouseEvent) => {
+      // Same rule as the keyboard: while the library is open these buttons belong
+      // to browsing, not to the video paused behind it.
+      if (inputSuspendedRef.current) return;
       if (e.button === 3) { e.preventDefault(); if (hasPrev) onPrev?.(); else skip(-10); }
       else if (e.button === 4) { e.preventDefault(); if (hasNext) onNext?.(); else skip(10); }
     };
@@ -1334,9 +1488,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       className={`relative w-full h-full bg-transparent group overflow-hidden flex flex-col justify-center select-none outline-none ${showControls ? '' : 'cursor-none'}`}
       tabIndex={0} // Allow focus
       onContextMenu={(e) => e.preventDefault()}
-      // In the mini-player there's no room for a volume slider on screen at all
-      // times — the wheel is the natural stand-in, with the usual overlay.
-      onWheel={isPip ? (e) => handleVolumeChange(volume + (e.deltaY < 0 ? 0.05 : -0.05), true, false) : undefined}
+      // Wheel = volume. Always at full size; in the mini-player only with the
+      // user's say-so (see handleWheel).
+      onWheel={handleWheel}
     >
       {/* Transparent click-surface. The actual picture is rendered by the mpv
           engine BEHIND the (transparent) WebView; this layer only captures
@@ -1381,6 +1535,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             // Defer so the 2nd click of a double-click can still cancel this
             singleClickTimerRef.current = setTimeout(() => {
               singleClickTimerRef.current = null;
+              // Something may have taken over in the meantime — clicking the video
+              // and then the library button inside the 300ms window used to fire this
+              // *after* the library had paused the video, flipping it back to playing
+              // behind the overlay.
+              if (inputSuspendedRef.current) return;
               togglePlay();
             }, 300);
           }
