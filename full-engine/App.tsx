@@ -206,6 +206,38 @@ function App() {
   // Auto-expire old GitHub shares on launch so nothing lingers in the cloud.
   useEffect(() => { import('./share').then(m => m.cleanupExpiredShares().catch(() => {})); }, []);
 
+  // ---------------------------------------------------------------------------
+  // Silent updates
+  //
+  // Fixes shouldn't cost the user a dialog: an update found by the launch check is
+  // downloaded and installed in the background, then the app restarts into it. The
+  // one hard rule is that it must never interrupt playback — so it only runs while
+  // nothing is loaded (the home screen, which is also where you are at launch). If
+  // a video is open the install waits for the app to go idle, and failing that the
+  // next launch picks it up again. A manual check still shows the dialog, since
+  // that one the user asked for.
+  const pendingSilentUpdateRef = useRef(false);
+  const silentInstallRef = useRef(false);
+
+  const installUpdateSilently = useCallback(async () => {
+    const update = updateRef.current;
+    if (!update || silentInstallRef.current) return;
+    silentInstallRef.current = true;
+    try {
+      console.info(`[updater] installing v${update.version} in the background`);
+      showToast(`Updating to v${update.version} — restarting…`);
+      await update.downloadAndInstall();
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (e) {
+      // Don't let a failed silent install swallow the update — fall back to the
+      // dialog so it can still be applied by hand.
+      console.warn('[updater] background install failed:', e);
+      silentInstallRef.current = false;
+      setUpdateBanner({ version: update.version, notes: update.body });
+    }
+  }, [showToast]);
+
   // Ask the Tauri updater whether a newer (signed) release exists; show the dialog if so.
   // Shared by the startup auto-check and the manual "Check for updates" button — so a user
   // who clicked "Later" can re-trigger it anytime. The updater fetches latest.json from the
@@ -221,11 +253,16 @@ function App() {
         updateRef.current = update;
         setUpdateStatus('idle');
         setUpdateProgress(0);
-        setUpdateBanner({ version: update.version, notes: update.body });
         if (manual) {
+          setUpdateBanner({ version: update.version, notes: update.body });
           setManualCheck('idle');
           // The update dialog sits below the settings modal, so get out of its way.
           setShowSettings(false);
+        } else if (playlistRef.current.length === 0) {
+          installUpdateSilently();
+        } else {
+          // Mid-video: hold it until the player is idle again.
+          pendingSilentUpdateRef.current = true;
         }
         return 'found';
       }
@@ -246,7 +283,15 @@ function App() {
       }
       return 'failed';
     }
-  }, []);
+  }, [installUpdateSilently]);
+
+  // An update held back because a video was open — apply it the moment the player
+  // goes idle (closing the video / going home), not while something is playing.
+  useEffect(() => {
+    if (playlist.length > 0 || !pendingSilentUpdateRef.current) return;
+    pendingSilentUpdateRef.current = false;
+    installUpdateSilently();
+  }, [playlist.length, installUpdateSilently]);
 
   useEffect(() => {
     // Grab the running version for display, then auto-check shortly after launch.
