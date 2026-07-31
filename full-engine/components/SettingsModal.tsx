@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   X, Settings as SettingsIcon, FolderOpen, RotateCcw,
-  SlidersHorizontal, Play, PictureInPicture2, Download,
+  SlidersHorizontal, Play, PictureInPicture2, Download, RefreshCw,
 } from 'lucide-react';
 import { AppSettings } from '../settings';
 
@@ -10,6 +10,12 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: AppSettings;
   onChange: (patch: Partial<AppSettings>) => void;
+  /** Running version, shown next to the manual update check. */
+  appVersion?: string;
+  /** Result of the last manual check, for the button's label. */
+  updateState?: 'idle' | 'checking' | 'uptodate' | 'error';
+  /** Run a check now. Omitted → the row is hidden (e.g. plain browser). */
+  onCheckUpdates?: () => void;
 }
 
 type SectionId = 'general' | 'playback' | 'pip' | 'downloads';
@@ -106,7 +112,9 @@ const Section: React.FC<{
   );
 };
 
-const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, onChange }) => {
+const SettingsModal: React.FC<SettingsModalProps> = ({
+  open, onClose, settings, onChange, appVersion, updateState = 'idle', onCheckUpdates,
+}) => {
   // Everything starts collapsed so the modal opens as a clean list of topics.
   const [openSections, setOpenSections] = useState<Record<SectionId, boolean>>({
     general: false, playback: false, pip: false, downloads: false,
@@ -269,9 +277,32 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, settings, 
                 )}
               </div>
             </div>
-            <Row title="Check for updates on launch" desc="Look for a newer version automatically at startup.">
+            <Row title="Check for updates on launch" desc="Look for a newer version automatically a few seconds after startup.">
               <Toggle checked={settings.autoCheckUpdates} onChange={(v) => onChange({ autoCheckUpdates: v })} />
             </Row>
+            {/* A check you can run right now — the launch one is invisible by nature,
+                and the home-screen button is out of reach while a video is open. */}
+            {onCheckUpdates && (
+              <Row
+                title="Check now"
+                desc={appVersion ? `You're running version ${appVersion}.` : 'Ask GitHub for the latest release.'}
+              >
+                <button
+                  onClick={onCheckUpdates}
+                  disabled={updateState === 'checking'}
+                  className="flex items-center gap-1.5 text-xs font-medium text-neutral-200 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-60 rounded-lg px-2.5 py-1.5 transition-colors active:scale-95"
+                >
+                  <RefreshCw size={13} className={updateState === 'checking' ? 'animate-spin' : ''} />
+                  {updateState === 'checking'
+                    ? 'Checking…'
+                    : updateState === 'uptodate'
+                      ? 'Up to date'
+                      : updateState === 'error'
+                        ? 'Failed — retry'
+                        : 'Check'}
+                </button>
+              </Row>
+            )}
           </Section>
         </div>
       </div>

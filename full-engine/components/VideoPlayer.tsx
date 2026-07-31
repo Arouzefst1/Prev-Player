@@ -425,6 +425,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // cleanup (the one that clears the spacebar's hold timer) underneath live keys.
   const onOpenLibraryRef = useRef(onOpenLibrary);
   const showLibraryButtonRef = useRef(showLibraryButton);
+  // The file-load effect only depends on `path`, so it reads the current default
+  // speed from here rather than closing over a stale prop.
+  const defaultSpeedRef = useRef(defaultSpeed);
   const isAudioRef = useRef(isAudio);
   useEffect(() => { isDraggingRef.current = isDragging; }, [isDragging]);
   useEffect(() => { isPipRef.current = isPip; }, [isPip]);
@@ -438,6 +441,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     showLibraryButtonRef.current = showLibraryButton;
     isAudioRef.current = isAudio;
     inputSuspendedRef.current = !!inputSuspended;
+    defaultSpeedRef.current = defaultSpeed;
   });
 
   // An overlay (library / settings) just took over: drop any click gesture still in
@@ -595,6 +599,22 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Put playback speed back to the Settings default.
+   *
+   * mpv holds `speed` as a GLOBAL property that survives `loadfile`, so a clip
+   * watched at 2× handed its speed to the next one — the default in Settings only
+   * ever applied to the first video of a session. Called both when the setting
+   * changes and on every file load, so "Default speed" means what it says.
+   */
+  const applyDefaultSpeed = useCallback(() => {
+    const speed = defaultSpeedRef.current;
+    mpvSetSpeed(speed).catch(() => {});
+    userSpeedRef.current = speed;
+    savedSpeedRef.current = speed;
+    setPlaybackSpeed(speed);
+  }, []);
+
   // --- Effect: Apply the user's default volume / speed. ---
   // mpv keeps these as global properties across files, so pushing them once is
   // enough for every later clip. But that also meant a mount-only apply made the
@@ -606,14 +626,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     initMpv().then((ok) => {
       if (!ok || cancelled) return;
       mpvSetVolume(defaultVolume).catch(() => {});
-      mpvSetSpeed(defaultSpeed).catch(() => {});
-      userSpeedRef.current = defaultSpeed;
-      savedSpeedRef.current = defaultSpeed;
+      applyDefaultSpeed();
       setVolume(defaultVolume);
-      setPlaybackSpeed(defaultSpeed);
     });
     return () => { cancelled = true; };
-  }, [defaultVolume, defaultSpeed]);
+  }, [defaultVolume, defaultSpeed, applyDefaultSpeed]);
 
   // (Resume-from-last-position is handled inside the file-load effect below, right
   // after mpv has the file open — that's the only moment a seek reliably lands.)
@@ -668,6 +685,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       // mpv now definitively has THIS file open — safe to attribute positions to it.
       progressIdRef.current = videoId ?? null;
+
+      // Every clip starts at the speed chosen in Settings. `speed` is global in mpv
+      // and survives a load, so without this the previous video's speed carried over.
+      applyDefaultSpeed();
 
       // Sanity-check the resume point against the file's REAL duration. A stored
       // position can't be trusted until now: an entry mis-attributed by an older

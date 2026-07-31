@@ -211,27 +211,40 @@ function App() {
   // who clicked "Later" can re-trigger it anytime. The updater fetches latest.json from the
   // GitHub endpoint and verifies its signature against the bundled public key. When found,
   // the dialog's "Update Now" downloads + installs + relaunches (no manual installer).
-  const runUpdateCheck = useCallback(async (manual: boolean) => {
+  const runUpdateCheck = useCallback(async (manual: boolean): Promise<'found' | 'none' | 'failed'> => {
     if (manual) setManualCheck('checking');
     try {
       const { check } = await import('@tauri-apps/plugin-updater');
       const update = await check();
       if (update) {
+        console.info(`[updater] update available: v${update.version}`);
         updateRef.current = update;
         setUpdateStatus('idle');
         setUpdateProgress(0);
         setUpdateBanner({ version: update.version, notes: update.body });
-        if (manual) setManualCheck('idle');
-      } else if (manual) {
+        if (manual) {
+          setManualCheck('idle');
+          // The update dialog sits below the settings modal, so get out of its way.
+          setShowSettings(false);
+        }
+        return 'found';
+      }
+      console.info('[updater] already on the latest version');
+      if (manual) {
         setManualCheck('uptodate');
         setTimeout(() => setManualCheck('idle'), 3000);
       }
-    } catch {
-      // Offline, manifest not published yet, or running in a plain browser.
+      return 'none';
+    } catch (e) {
+      // Offline, manifest not published yet, or running in a plain browser. Logged
+      // rather than swallowed — a silent catch is why a broken check looked identical
+      // to "no update available".
+      console.warn('[updater] check failed:', e);
       if (manual) {
         setManualCheck('error');
         setTimeout(() => setManualCheck('idle'), 3000);
       }
+      return 'failed';
     }
   }, []);
 
@@ -243,11 +256,27 @@ function App() {
         setAppVersion(await getVersion());
       } catch {}
     })();
+
     // Only auto-check at launch when the user hasn't turned it off.
-    const t = settingsRef.current.autoCheckUpdates
-      ? setTimeout(() => runUpdateCheck(false), 4000) // wait for app to settle
-      : undefined;
-    return () => { if (t) clearTimeout(t); };
+    if (!settingsRef.current.autoCheckUpdates) return;
+
+    // The first attempt lands 4s in, when the network stack may still be coming up
+    // after a cold boot — and a single silent attempt is indistinguishable from the
+    // feature being dead. Retry with a backoff, and stop the moment one lands.
+    const delays = [4000, 20000, 60000];
+    let attempt = 0;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      if (cancelled) return;
+      const result = await runUpdateCheck(false);
+      if (cancelled || result !== 'failed') return;
+      attempt += 1;
+      if (attempt < delays.length) timer = setTimeout(tick, delays[attempt]);
+      else console.warn('[updater] giving up on the launch check for this session');
+    };
+    timer = setTimeout(tick, delays[0]);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [runUpdateCheck]);
 
   // ---------------------------------------------------------------------------
@@ -1502,6 +1531,9 @@ function App() {
         onClose={() => setShowSettings(false)}
         settings={settings}
         onChange={updateSettings}
+        appVersion={appVersion}
+        updateState={manualCheck}
+        onCheckUpdates={() => runUpdateCheck(true)}
       />
     </div>
   );
