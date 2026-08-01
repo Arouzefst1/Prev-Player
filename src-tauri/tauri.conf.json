@@ -1,6 +1,6 @@
 {
   "productName": "PREV Player",
-  "version": "1.0.13",
+  "version": "1.5.0",
   "identifier": "com.prev-player.app",
   "build": {
     "beforeDevCommand": "npm run vite-dev",
@@ -15,7 +15,7 @@
         "https://github.com/Arouzefst1/Prev-Player/releases/latest/download/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     },
     "deep-link": {
@@ -28,6 +28,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": ["resources/mpv/*"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "fileAssociations": [
       {
@@ -56,7 +57,8 @@
         "width": 1280,
         "height": 800,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "transparent": true
       }
     ],
     "security": {

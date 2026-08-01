@@ -1,97 +1,103 @@
-# PREV Player
+# PREV Player — mpv front end, engine back end
 
-A fast, lightweight desktop video player for Windows built with Tauri + React.  
-Videos play **directly from their original location** — nothing is ever copied or duplicated.
+This folder is the two halves of the project joined up: the mpv-based player from
+`full-engine/`, with every byte that moves between devices handled by the chunk
+engine from `prev-engine/`.
 
----
+Both source folders are left untouched. This one is a copy of what each needed —
+the app's own source and the six engine crates — plus the wiring between them.
 
-## Download
-
-**[Download latest release →](https://github.com/Arouzefst1/Prev-Player/releases/latest)**
-
-> The installer is in the **Releases** section (right sidebar on GitHub), not inside the source code folders.  
-> The source code is the code that builds the app — the actual installer (`.exe`) is attached to each release.
-
----
-
-## Installation
-
-1. Go to [Releases](https://github.com/Arouzefst1/Prev-Player/releases/latest)
-2. Download `PREV Player_x.x.x_x64-setup.exe`
-3. Run it and follow the installer
-4. Done — video files (`.mp4`, `.mkv`, `.avi`, etc.) will automatically open in PREV Player when double-clicked
-
-> **Windows SmartScreen warning?**  
-> Click **"More info"** → **"Run anyway"**. This appears because the app isn't signed with a paid certificate yet. It contains no malware.
-
-**Requires:** Windows 10 or Windows 11 (64-bit)  
-WebView2 is bundled — no extra software needed.
-
----
-
-## Features
-
-- **Zero double storage** — library stores file paths only, not copies of your videos
-- **Video library** — add videos and folders, with thumbnails and duration
-- **Folder playlists** — import a folder; clicking any video loads the whole folder as a playlist
-- **Drag-to-reorder** — reorder library and queue with Spotify-style drop indicators
-- **File associations** — double-click any supported video file to open it directly
-- **Single instance** — opening a file while the app is running adds it to the queue
-- **Resume watching** — remembers where you left off for each video
-- **Subtitles** — VTT and SRT support
-- **Playback speed** — 0.25× to 2×
-- **Keyboard shortcuts** — Space/K (play/pause), J/L (skip), F (fullscreen), M (mute), C (subtitles)
-- **Picture-in-Picture** — native PiP with fullscreen restore on return
-- **Queue panel** — drag-to-reorder the current playlist while playing
-- **Auto-updater** — notified on launch when a new version is available
-
-**Supported formats:** MP4, MKV, AVI, MOV, WMV, WebM, FLV, M4V, OGV, OGG, 3GP, 3G2, TS, MTS, M2TS, VOB, MPG, MPEG
-
----
-
-## Building from source
-
-**Prerequisites**
-- [Node.js 20+](https://nodejs.org)
-- [Rust + cargo](https://rustup.rs)
-- [VS 2022 Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with the **Desktop development with C++** workload
-
-```bash
-# Clone the repo
-git clone https://github.com/Arouzefst1/Prev-Player.git
-cd Prev-Player
-
-# Install JS dependencies
-npm install
-
-# Dev mode (hot-reload)
-npm run dev
-
-# Build installer
-npm run build
-# Output: src-tauri/target/release/bundle/nsis/PREV Player_x.x.x_x64-setup.exe
+```
+prev-player/
+  App.tsx, components/, mpv.ts, pip.ts, utils.ts, settings.ts   the player
+  engine.ts                    the bridge: every engine_* command, one event feed
+  share.ts                     GitHub accounts/uploads, and link ⇄ engine link
+  engine/crates/               prev-core · transport · share · download · stream · engine
+  src-tauri/src/engine.rs      the engine as Tauri state + a thin command layer
+  src-tauri/src/share.rs       what the engine has no opinion about: GitHub REST
+  src-tauri/src/lib.rs         plugins, commands, startup, shutdown
 ```
 
-> `src-tauri/target/` is excluded from git (it's multi-GB compiled output).  
-> Run `npm run build` to generate it locally.
+## What changed against `full-engine/`
 
----
-
-## Publishing a new release
-
-1. Bump `version` in `src-tauri/tauri.conf.json` (e.g. `"1.0.1"`)
-2. Run `npm run build`
-3. Create a GitHub release with tag `v1.0.1` and attach the new setup.exe
-4. All installed copies will show the update dialog on their next launch
-
----
-
-## Tech stack
-
-| Layer | Technology |
+| Before | Now |
 |---|---|
-| UI | React 19 + TypeScript + Tailwind CSS |
-| Desktop shell | Tauri v2 (Rust + Windows WebView2) |
-| Drag-and-drop | @dnd-kit/sortable |
-| Local storage | IndexedDB (metadata only) + localStorage |
-| Icons | Lucide React |
+| `share.rs::download_file` — one stream, append-only, resumes by file length | `Engine::download` — N workers, chunk map, verified, resumes by chunk |
+| `share.rs::download_control` | `Engine::pause` / `resume` / `cancel` |
+| `lan.rs` — whole file, ids from nanotime, **no `Content-Length` over 32 KB so receivers couldn't seek** | `Engine::share_file` / `share_folder` — hash-derived ids, lazy digests, ranges that work |
+| *(nothing)* | `Engine::watch` — watch online against a bounded RAM buffer |
+| *(nothing)* | `Engine::save_stream` — keep what you're watching, out of the buffer |
+| downloads vanished on quit | the chunk map is on disk; they come back resumable |
+
+`lan.rs` is gone entirely. `share.rs` kept only the GitHub REST passthrough and
+the streaming asset upload — a release asset URL is a range-serving HTTP source
+like any other, so the engine downloads and streams it directly.
+
+## How a share flows
+
+Everything reduces to **one engine link**, and after that there is only one path:
+
+- **Local Wi-Fi** — `engine.shareFile()` mints the link; `share.ts` wraps it in a
+  `prevplayer://` URL so the OS hands clicks back to the app.
+- **GitHub** — `share.ts` uploads the assets and looks the release up (that part
+  needs a token and the REST API), then `engine_http_link` turns the asset list
+  into an engine link. The wire format stays in Rust.
+- **Pasted `prev://` or bare `https://`** — passes straight through.
+
+Then: `engine.resolve(link)` → what's in it, `engine.watch(link, i)` → a local
+seekable URL for mpv, `engine.download(link, indices, dir)` → transfers.
+
+A folder share you are watching online opens one stream at a time — the session
+for an item is created when you reach it and freed when you leave, because
+opening all of them up front would mean one prefetching buffer per file.
+
+## Settings
+
+Under *Downloads & updates*: **streaming buffer** (50 MB – 1 GB, default 256 MB)
+and **download connections** (default: from the CPU count). They live in Rust —
+`%APPDATA%/com.prev-player.app/engine.json` — because they are read before the
+first window exists, and a live stream can't be re-sized. Both apply on the next
+launch, which the panel says.
+
+## Running it
+
+```bash
+npm install
+npm run dev      # vite + tauri
+npm run build    # installer → src-tauri/target/release/bundle/nsis/
+```
+
+**mpv is not in this repo.** The app bundles `mpv.exe` (~115 MB) plus
+`d3dcompiler_43.dll` at `src-tauri/resources/mpv/`, declared in
+`bundle.resources` and resolved at runtime via `resolveResource`. That directory
+is gitignored because of its size — drop a Windows mpv build there before
+packaging. In development the app falls back to whatever `mpv` is on `PATH`, so
+`npm run dev` works without it.
+
+Verify the engine on its own:
+
+```bash
+cd engine && cargo test --workspace     # 110 tests
+```
+
+## Releasing
+
+Bump the version in **three** files — `package.json`, `src-tauri/tauri.conf.json`
+and `src-tauri/Cargo.toml` — then:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat <path-to>/prev-player-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npx tauri build --bundles nsis
+```
+
+That produces the installer and its `.sig` under
+`src-tauri/target/release/bundle/nsis/`. The updater manifest (`latest.json`) is
+written by hand — Tauri doesn't emit one — with the `.sig` contents as
+`signature`, and published alongside the installer on a GitHub release.
+
+The **private signing key lives outside this repository and must stay there.**
+Only the signature and the public key (in `tauri.conf.json`) are ever published.
+
+The updater only moves forward and the identifier is unchanged
+(`com.prev-player.app`), so a release from here upgrades every existing install.

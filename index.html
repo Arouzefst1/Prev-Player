@@ -51,11 +51,24 @@
       input[type="range"]:focus {
         outline: none;
       }
-      
-      /* Hide scrollbar for clean UI */
-      body {
+
+      /* Sleek, subtle scrollbar (replaces the chunky default WebView one). */
+      .custom-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
+      .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.18);
+        border-radius: 999px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.32); }
+      .custom-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+
+      /* Hide scrollbar for clean UI.
+         NOTE (native engine): html/body are transparent so the mpv video, which
+         renders BEHIND the WebView, shows through. Opaque screens (home, library)
+         set their own background; the player view stays transparent over mpv. */
+      html, body {
         overflow: hidden;
-        background-color: #000;
+        background: transparent;
         -webkit-user-select: none;
         user-select: none;
         -webkit-touch-callout: none;
@@ -234,6 +247,14 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
+      /* The "1" badge pops in when repeat-one is picked (queue only). */
+      @keyframes loopOnePop {
+        0% { transform: scale(0); opacity: 0; }
+        60% { transform: scale(1.25); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      .loop-one-pop { animation: loopOnePop 0.35s cubic-bezier(0.34, 1.4, 0.64, 1); transform-origin: center; }
+
       /* Progress ring pulse glow for loading indicator (Fix #6) */
       @keyframes progressPulse {
         0%, 100% { filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.3)); }
@@ -248,6 +269,53 @@
         body {
           font-size-adjust: 0.5;
         }
+      }
+
+      /* ── Playback-speed slider (YouTube-style) with a heart thumb ──────────
+         Selectors are qualified with input[type="range"] so they out-specify
+         the generic range styles above (incl. the >641px media query). The
+         filled portion is driven by a --pct custom property set inline. */
+      input[type="range"].speed-slider {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        background: transparent;
+      }
+      input[type="range"].speed-slider::-webkit-slider-runnable-track {
+        height: 5px;
+        border-radius: 999px;
+        background: linear-gradient(to right, #ffffff var(--pct, 50%), rgba(255,255,255,0.25) var(--pct, 50%));
+      }
+      input[type="range"].speed-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 16px;
+        height: 16px;
+        margin-top: -5.5px;
+        border: none;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        cursor: pointer;
+      }
+      input[type="range"].speed-slider::-moz-range-track {
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.25);
+      }
+      input[type="range"].speed-slider::-moz-range-progress {
+        height: 5px;
+        border-radius: 999px;
+        background: #ffffff;
+      }
+      input[type="range"].speed-slider::-moz-range-thumb {
+        width: 16px;
+        height: 16px;
+        border: none;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        cursor: pointer;
       }
     </style>
 </head>

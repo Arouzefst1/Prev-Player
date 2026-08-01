@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings, Captions, MoreVertical } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings, Captions, MoreVertical, Download as DownloadIcon, Info } from 'lucide-react';
 import { formatTime } from '../utils';
+import { useSettings } from '../settings';
+import SpeedPanel from './SpeedPanel';
+import LoopButton, { type LoopMode } from './LoopButton';
 
 interface PlayerControlsProps {
   isPlaying: boolean;
@@ -12,7 +15,10 @@ interface PlayerControlsProps {
   playbackSpeed: number;
   hasSubtitles: boolean;
   subtitlesEnabled: boolean;
-  isLooping: boolean;
+  /** off → play once; all → repeat the queue; one → repeat this video. */
+  loopMode: LoopMode;
+  /** A queue exists, so the loop button offers all three modes. */
+  hasQueueToLoop?: boolean;
   onPlayPause: () => void;
   onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onSeekStart: () => void;
@@ -36,6 +42,10 @@ interface PlayerControlsProps {
   // Queue
   onToggleQueue?: () => void;
   showQueue?: boolean;
+  /** Save the streaming video to disk. Absent unless it's a stream worth keeping. */
+  onDownload?: () => void;
+  /** Open the Properties panel for whatever is playing. */
+  onShowInfo?: () => void;
 }
 
 const PlayerControls: React.FC<PlayerControlsProps> = ({
@@ -48,7 +58,8 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   playbackSpeed,
   hasSubtitles,
   subtitlesEnabled,
-  isLooping,
+  loopMode,
+  hasQueueToLoop,
   onPlayPause,
   onSeek,
   onSeekStart,
@@ -70,12 +81,14 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   hasPrev,
   onToggleQueue,
   showQueue,
+  onDownload,
+  onShowInfo,
 }) => {
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
   const progressPercent = duration ? (currentTime / duration) * 100 : 0;
-
-  const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  const [appSettings] = useSettings();
+  const speedStep = appSettings.speedStep ?? 0.5;
 
   const formatTime = (seconds: number): string => {
     if (!seconds || !isFinite(seconds)) return '0:00';
@@ -259,37 +272,9 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </div>
           </div>
 
-          {/* Loop Button - Next to Volume */}
-          <button
-            onClick={onToggleLoop}
-            className={`p-1 transition-all duration-300 active:scale-95 relative ${
-              isLooping 
-                ? 'text-red-500' 
-                : 'text-white/50 hover:text-white'
-            }`}
-            title={isLooping ? 'Loop: On' : 'Loop: Off'}
-          >
-            <svg 
-              width="20" 
-              height="20" 
-              viewBox="0 0 24 24" 
-              fill="none" 
-              stroke="currentColor" 
-              strokeWidth="2" 
-              strokeLinecap="round" 
-              strokeLinejoin="round"
-              className={`sm:w-6 sm:h-6 transition-transform duration-500 ${isLooping ? 'rotate-0' : 'rotate-180'}`}
-            >
-              <path d="M17 2l4 4-4 4" />
-              <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
-              <path d="M7 22l-4-4 4-4" />
-              <path d="M21 13v1a4 4 0 0 1-4 4H3" />
-            </svg>
-            {/* Active indicator dot */}
-            {isLooping && (
-              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-            )}
-          </button>
+          {/* Loop — plain on/off for a single video; cycles off → repeat queue
+              → repeat one once there's a queue to repeat (see LoopButton). */}
+          <LoopButton mode={loopMode} hasQueue={!!hasQueueToLoop} onCycle={onToggleLoop} size={22} />
 
           {/* Time Display - Next to Volume */}
           <button 
@@ -324,6 +309,28 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </button>
           )}
 
+          {/* Codec, resolution, frame rate, and where the file actually lives. */}
+          {onShowInfo && (
+            <button
+              onClick={onShowInfo}
+              className="text-white/70 hover:text-white transition-colors p-1 active:scale-95"
+              title="Properties"
+            >
+              <Info size={18} className="sm:w-6 sm:h-6" />
+            </button>
+          )}
+
+          {/* Save this stream — only offered while watching one that isn't kept yet. */}
+          {onDownload && (
+            <button
+              onClick={onDownload}
+              className="text-white/70 hover:text-white transition-colors p-1 active:scale-95"
+              title="Save this video to your library"
+            >
+              <DownloadIcon size={18} className="sm:w-6 sm:h-6" />
+            </button>
+          )}
+
           {/* Settings Menu */}
           <div className="relative" ref={settingsRef}>
             <button
@@ -335,27 +342,12 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             </button>
             
             {showSettings && (
-                <div className="absolute bottom-12 right-0 bg-black/90 rounded-xl p-1.5 sm:p-2 w-40 sm:w-48 shadow-xl border border-white/10 overflow-hidden animate-fade-in text-xs sm:text-sm z-50">
-                    <div className="p-1.5 sm:p-2 border-b border-white/10 mb-1.5 sm:mb-2 font-bold text-gray-400 text-xs">Settings</div>
-                    <div className="mb-1.5 sm:mb-2">
-                        <div className="px-2 py-0.5 text-xs text-gray-400 font-semibold uppercase tracking-wider">Speed</div>
-                        <div className="max-h-32 overflow-y-auto custom-scrollbar">
-                            {speeds.map(s => (
-                                <button
-                                    key={s}
-                                    onClick={() => {
-                                        onSpeedChange(s);
-                                        setShowSettings(false);
-                                    }}
-                                    className={`w-full text-left px-2 sm:px-3 py-1.5 sm:py-2 hover:bg-white/10 rounded flex justify-between text-xs sm:text-sm active:scale-95 ${playbackSpeed === s ? 'text-red-500 font-bold' : 'text-white'}`}
-                                >
-                                    <span>{s === 1 ? 'Normal' : s + 'x'}</span>
-                                    {playbackSpeed === s && <span>✓</span>}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
+                <SpeedPanel
+                    speed={playbackSpeed}
+                    step={speedStep}
+                    onChange={onSpeedChange}
+                    onClose={() => setShowSettings(false)}
+                />
             )}
           </div>
 

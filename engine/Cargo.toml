@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prev-core",
+    "crates/prev-transport",
+    "crates/prev-share",
+    "crates/prev-download",
+    "crates/prev-stream",
+    "crates/prev-engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+prev-core = { path = "crates/prev-core" }
+prev-transport = { path = "crates/prev-transport" }
+prev-share = { path = "crates/prev-share" }
+prev-download = { path = "crates/prev-download" }
+prev-stream = { path = "crates/prev-stream" }
+prev-engine = { path = "crates/prev-engine" }
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tiny_http = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "signal"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Faster dev iteration: dependencies get optimised, our crates stay debuggable.
+[profile.dev.package."*"]
+opt-level = 2

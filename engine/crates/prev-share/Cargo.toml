@@ -1,0 +1,16 @@
+[package]
+name = "prev-share"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sender side: an ephemeral LAN server that streams shared media straight from disk, plus link generation."
+
+[dependencies]
+prev-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+
+[dev-dependencies]
+prev-transport.workspace = true
+tokio.workspace = true

@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import {
   X, Share2, Link2, Download, Play, Copy, Check, Loader2, KeyRound, AlertCircle,
   Folder, ExternalLink, Wifi, Cloud, Square, Trash2, ListChecks,
 } from 'lucide-react';
 import {
   isShareConnected, getShareUser, connectGitHub, disconnectShare,
-  shareFile, shareFolder, parseShareLink, resolveShare, downloadItem, shareDownloadDir,
+  shareFile, shareFolder, toEngineLink, shareDownloadDir,
   lanShareFile, lanShareFolder, lanStop,
   listMyShares, deleteShare, type MyShare,
-  type ResolvedShare,
 } from '../share';
+import * as engine from '../engine';
+import { settingsStore } from '../settings';
 
 type Mode = 'menu' | 'connect' | 'method' | 'receive' | 'sharing' | 'manage';
 type ShareMethod = 'lan' | 'github';
@@ -27,25 +27,30 @@ interface ShareModalProps {
   folderTarget?: { files: { path: string; name: string }[]; name: string } | null;
   /** When opened via a prevplayer:// deep-link — jump straight to receive + resolve. */
   initialLink?: string | null;
-  /** Stream a received item (view online). */
-  onWatch: (items: { url: string; name: string }[], startIndex: number) => void;
+  /** Watch online: stream it, nothing saved to disk. */
+  onWatchOnline: (link: string, files: engine.ResolvedFile[]) => void;
+  /** Download every listed file in parallel (app manager, persistent panel). */
+  onDownload: (
+    link: string,
+    files: engine.ResolvedFile[],
+    dir: string,
+    group?: { id: string; name: string },
+  ) => void;
   /** True if a video with this file name is already in the library. */
   hasInLibrary: (name: string) => boolean;
   /** Open an already-owned library video by file name. */
   onOpenByName: (name: string) => void;
-  /** A downloaded file was saved locally → add to library + open. */
-  onImported: (localPath: string, name: string) => Promise<void>;
 }
 
 const fmtSize = (b: number) => {
-  if (!b) return '';
+  if (!b) return '0 B';
   const u = ['B', 'KB', 'MB', 'GB']; let i = 0; let n = b;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 };
 
 const ShareModal: React.FC<ShareModalProps> = ({
-  open, onClose, shareTarget, folderTarget, initialLink, onWatch, hasInLibrary, onOpenByName, onImported,
+  open, onClose, shareTarget, folderTarget, initialLink, onWatchOnline, onDownload, hasInLibrary, onOpenByName,
 }) => {
   const [mode, setMode] = useState<Mode>('menu');
   const [busy, setBusy] = useState(false);
@@ -76,15 +81,12 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
   // receive
   const [linkInput, setLinkInput] = useState('');
-  const [resolved, setResolved] = useState<ResolvedShare | null>(null);
-  const [dlId, setDlId] = useState<string | null>(null);
-  const [dlPct, setDlPct] = useState(0);
-  const dlIdRef = useRef<string | null>(null);
+  const [resolved, setResolved] = useState<engine.Resolved | null>(null);
 
   // Decide the initial view whenever the modal opens.
   useEffect(() => {
     if (!open) return;
-    setError(''); setCopied(false); setShareLink(''); setResolved(null); setDlPct(0); setDlId(null);
+    setError(''); setCopied(false); setShareLink(''); setResolved(null);
     setLanId(null);
     if (initialLink) {
       setMode('receive'); setLinkInput(initialLink); doResolve(initialLink);
@@ -97,16 +99,6 @@ const ShareModal: React.FC<ShareModalProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, shareTarget, folderTarget, initialLink]);
-
-  // Download progress events from Rust.
-  useEffect(() => {
-    const un = listen<{ id: string; transferred: number; total: number; done: boolean }>('share-progress', (e) => {
-      if (e.payload.id !== dlIdRef.current) return;
-      const { transferred, total } = e.payload;
-      setDlPct(total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 0);
-    });
-    return () => { un.then(f => f()); };
-  }, []);
 
   const pendingRef = useRef<ShareJob | null>(null);
 
@@ -195,49 +187,58 @@ const ShareModal: React.FC<ShareModalProps> = ({
     } finally { setBusy(false); }
   };
 
+  // Whatever was pasted becomes one engine link, and the engine says what's
+  // behind it. A folder share answers from the link itself — no network at all.
   const doResolve = async (explicitLink?: string) => {
     setBusy(true); setError(''); setResolved(null);
     try {
-      const p = parseShareLink(explicitLink ?? linkInput);
-      if (!p) throw new Error('That doesn’t look like a PREV share link.');
-      const r = await resolveShare(p);
-      if (!r.items.length) throw new Error('This share has no playable files.');
+      const link = await toEngineLink(explicitLink ?? linkInput);
+      const r = await engine.resolve(link);
+      if (!r.files.length) throw new Error('This share has no playable files.');
+      if (!r.seekable) {
+        throw new Error('That source won’t serve byte ranges, so it can’t be streamed or downloaded in parallel.');
+      }
       setResolved(r);
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally { setBusy(false); }
   };
 
-  const watchAll = () => {
+  const groupOf = (r: engine.Resolved) =>
+    (r.kind === 'folder' ? { id: 'grp-' + Math.random().toString(36).slice(2), name: r.name } : undefined);
+
+  // Watch online: stream it and nothing else — no folder prompt, nothing written
+  // to disk. If they decide to keep it, the download button in the player's
+  // control bar starts the transfer without interrupting playback, and what's
+  // already buffered goes straight to the file.
+  const doWatch = () => {
     if (!resolved) return;
-    onWatch(resolved.items.map(i => ({ url: i.url, name: i.name })), 0);
+    onWatchOnline(resolved.link, resolved.files);
     onClose();
   };
 
-  const downloadAll = async () => {
+  // Download: pick where, then hand ALL files to the app's parallel download manager
+  // (progress lives in the persistent Downloads panel, not this dialog).
+  const doDownload = async () => {
     if (!resolved) return;
-    setBusy(true); setError('');
-    try {
-      const dir = await shareDownloadDir();
-      const { join } = await import('@tauri-apps/api/path');
-      let firstPath = ''; let firstName = '';
-      for (const item of resolved.items) {
-        if (hasInLibrary(item.name)) { if (!firstName) { firstName = item.name; } continue; }
-        const id = 'dl-' + Math.random().toString(36).slice(2);
-        dlIdRef.current = id; setDlId(id); setDlPct(0);
-        const dest = await join(dir, item.name);
-        await downloadItem(item.url, dest, id);
-        await onImported(dest, item.name);
-        if (!firstPath) { firstPath = dest; firstName = item.name; }
-      }
-      dlIdRef.current = null; setDlId(null);
-      // If everything was already owned, just open the first one.
-      if (!firstPath && firstName) onOpenByName(firstName);
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      dlIdRef.current = null; setDlId(null);
-    } finally { setBusy(false); }
+    setError('');
+    if (resolved.files.every(it => hasInLibrary(it.name))) { onOpenByName(resolved.files[0].name); onClose(); return; }
+    const custom = settingsStore.get().downloadPath;
+    let dir = '';
+    if (custom && custom.trim()) {
+      // A download folder is set in Settings → save straight there, no prompt.
+      dir = custom;
+    } else {
+      try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const def = await shareDownloadDir();
+        const picked = await open({ directory: true, multiple: false, title: 'Save downloads to…', defaultPath: def });
+        if (picked === null) return; // user cancelled the folder picker
+        dir = typeof picked === 'string' ? picked : def;
+      } catch { dir = await shareDownloadDir(); }
+    }
+    onDownload(resolved.link, resolved.files, dir, groupOf(resolved));
+    onClose();
   };
 
   const copyLink = async () => {
@@ -246,7 +247,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
   if (!open) return null;
 
-  const allOwned = resolved?.items.every(i => hasInLibrary(i.name));
+  const allOwned = resolved?.files.every(i => hasInLibrary(i.name));
 
   return (
     <div className="fixed inset-0 z-[320] bg-black/70 flex items-center justify-center p-4 animate-[fadeIn_0.15s_ease]" onClick={onClose}>
@@ -460,31 +461,29 @@ const ShareModal: React.FC<ShareModalProps> = ({
                     <div className="min-w-0">
                       <div className="text-white text-sm font-medium truncate">{resolved.name}</div>
                       <div className="text-neutral-500 text-xs">
-                        {resolved.items.length} file{resolved.items.length > 1 ? 's' : ''}
+                        {resolved.files.length} file{resolved.files.length > 1 ? 's' : ''}
+                        {resolved.totalSize > 0 && ` · ${fmtSize(resolved.totalSize)}`}
                         {allOwned && ' · already in your library'}
                       </div>
                     </div>
                   </div>
 
-                  {dlId ? (
-                    <div>
-                      <div className="h-2 w-full bg-neutral-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-red-500 to-purple-500 transition-all" style={{ width: `${dlPct}%` }} />
-                      </div>
-                      <p className="text-xs text-neutral-400 mt-2 text-center">Downloading… {dlPct}%</p>
-                    </div>
-                  ) : (
-                    <div className="flex gap-2 pt-1">
-                      <button onClick={watchAll} className="flex-1 py-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm font-medium text-white flex items-center justify-center gap-2">
-                        <Play size={16} /> Watch
-                      </button>
-                      <button onClick={downloadAll} disabled={busy} className="flex-1 py-2.5 rounded-lg bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-sm font-bold text-white flex items-center justify-center gap-2 disabled:opacity-50">
-                        {busy ? <Loader2 size={16} className="animate-spin" /> : (allOwned ? <Play size={16} /> : <Download size={16} />)}
-                        {allOwned ? 'Open' : 'Download'}
-                      </button>
-                    </div>
-                  )}
-                  <p className="text-[11px] text-neutral-500 text-center">Watch streams it instantly · Download saves it to your library.</p>
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={doWatch} className="flex-1 py-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm font-medium text-white flex items-center justify-center gap-2">
+                      <Play size={16} /> Watch online
+                    </button>
+                    <button onClick={doDownload} className="flex-1 py-2.5 rounded-lg bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-500 hover:to-purple-500 text-sm font-bold text-white flex items-center justify-center gap-2">
+                      {allOwned ? <Play size={16} /> : <Download size={16} />}
+                      {allOwned ? 'Open' : 'Download'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-neutral-500 text-center">
+                    {allOwned
+                      ? 'Already saved — opens straight from your library.'
+                      : resolved.files.length > 1
+                        ? 'Watch online streams them without saving anything · Download asks where to keep them and fetches all of them in parallel.'
+                        : 'Watch online streams it without saving anything (you can still keep it later, from the player) · Download asks where to keep it.'}
+                  </p>
                 </>
               )}
             </div>

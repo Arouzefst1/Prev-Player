@@ -26,11 +26,12 @@ dist-ssr
 # Rust / Tauri build artifacts (multi-GB — never commit)
 /src-tauri/target/
 /src-tauri/gen/schemas/
+/engine/target/
+
+# The bundled mpv binary (~120 MB) — fetched, not committed.
+/src-tauri/resources/
 
 # Tauri updater signing keys — never commit
 *.key
 *.key.pub
 /.tauri/
-
-# bundled mpv engine binary (large)
-full-engine/src-tauri/resources/mpv/

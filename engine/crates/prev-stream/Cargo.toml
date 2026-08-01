@@ -1,0 +1,18 @@
+[package]
+name = "prev-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Watch Online: a rolling in-memory chunk buffer served to the player over local HTTP, with an optional save-to-disk tap."
+
+[dependencies]
+prev-core.workspace = true
+prev-download.workspace = true
+prev-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+prev-share.workspace = true

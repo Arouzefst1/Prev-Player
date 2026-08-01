@@ -3,8 +3,8 @@ use tauri::{Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri_plugin_deep_link::DeepLinkExt;
 
+mod engine;
 mod share;
-mod lan;
 
 struct InitialFiles(Mutex<Vec<String>>);
 
@@ -13,6 +13,22 @@ struct InitialFiles(Mutex<Vec<String>>);
 #[tauri::command]
 fn get_initial_files(state: State<InitialFiles>) -> Vec<String> {
     state.0.lock().unwrap().clone()
+}
+
+/// Absolute path to the mpv binary bundled with the app, or None if it isn't
+/// present (then the frontend falls back to mpv on PATH). Verified to exist so we
+/// never hand the mpv plugin a bogus path.
+#[tauri::command]
+fn bundled_mpv_path(app: tauri::AppHandle) -> Option<String> {
+    let p = app
+        .path()
+        .resolve("resources/mpv/mpv.exe", tauri::path::BaseDirectory::Resource)
+        .ok()?;
+    if p.exists() {
+        Some(p.to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,10 +41,11 @@ pub fn run() {
         .collect();
 
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_mpv::init())
         .plugin(tauri_plugin_deep_link::init())
         .manage(InitialFiles(Mutex::new(initial_files)))
         // Single-instance: if a second instance is opened (e.g. user opens another video
-        // file), forward the new file paths to the already-running window.
+        // file, or a prevplayer:// deep-link), forward the args to the running window.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let paths: Vec<String> = argv
                 .iter()
@@ -57,26 +74,49 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            // Register the prevplayer:// scheme at runtime so links open the app
-            // during development (the installer registers it for release builds).
+            // Register the prevplayer:// scheme at runtime so links open the app in dev
+            // (the installer registers it for release builds).
             #[cfg(desktop)]
             {
                 let _ = app.deep_link().register_all();
             }
+            // One engine owns every transfer: LAN shares, streams, downloads.
+            engine::init(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_initial_files,
-            share::download_file,
+            bundled_mpv_path,
             share::upload_github_asset,
             share::github_api,
             share::write_temp_file,
-            share::share_download_dir,
-            lan::lan_share_file,
-            lan::lan_share_folder,
-            lan::lan_stop,
-            lan::lan_stop_all
+            engine::engine_share_file,
+            engine::engine_share_folder,
+            engine::engine_stop_share,
+            engine::engine_stop_all_shares,
+            engine::engine_http_link,
+            engine::engine_resolve,
+            engine::engine_watch,
+            engine::engine_stop_watch,
+            engine::engine_download,
+            engine::engine_pause,
+            engine::engine_resume,
+            engine::engine_cancel,
+            engine::engine_transfers,
+            engine::engine_save_stream,
+            engine::engine_stop_saving,
+            engine::engine_finish_save,
+            engine::engine_download_dir,
+            engine::engine_tuning,
+            engine::engine_set_tuning
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running PREV Player");
+        .build(tauri::generate_context!())
+        .expect("error while running PREV Player")
+        // Shares and stream buffers die with the app; in-flight downloads keep
+        // their .partial files and resume next launch.
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                engine::shutdown(app);
+            }
+        });
 }

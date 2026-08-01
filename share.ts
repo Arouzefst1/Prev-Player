@@ -1,13 +1,19 @@
 // ===========================================================================
-// Sharing — GitHub Release assets as a free, lifetime, CDN-streamed backend.
+// Sharing — the two backends, and the one link that hides which is which.
 //
-// Sharer: uploads the file(s) as assets on a release in the user's `prev-shares`
-// repo, and returns a compact self-contained link.
-// Receiver: parses the link, resolves the release's assets via the public GitHub
-// API, then Watches (streams the CDN url) or Downloads (→ library → opens).
+// Local Wi-Fi shares are served by the engine itself, so the link it mints is
+// already an engine link and this file just wraps it for the `prevplayer://`
+// scheme the OS knows about.
+//
+// GitHub shares need work that isn't the engine's business: an account, a token,
+// and a REST API. So the upload and the release lookup live here — but the
+// result is turned straight back into an engine link (`httpLink`), because a
+// release asset is a range-serving HTTP source like any other. From
+// `toEngineLink` onwards there is only one kind of share.
 // ===========================================================================
 
 import { invoke } from '@tauri-apps/api/core';
+import * as engine from './engine';
 
 const LS_TOKEN = 'prevplayer_gh_token';
 const LS_USER = 'prevplayer_gh_user';
@@ -56,11 +62,18 @@ export async function connectGitHub(token: string): Promise<string> {
 // ---- link format: prevplayer://share/<base64url(payload)> -----------------
 export interface SharePayload {
   v: 1;
-  k: 'file' | 'folder' | 'lan-file' | 'lan-folder';
+  /**
+   * `engine` is what everything new mints — the payload carries a ready engine
+   * link and needs no lookup at all. `file`/`folder` are GitHub shares, which
+   * still need a release lookup. `lan-*` are links from before the engine, kept
+   * readable so an old sender's link doesn't dead-end.
+   */
+  k: 'engine' | 'file' | 'folder' | 'lan-file' | 'lan-folder';
   r?: string;   // GitHub owner
   t?: string;   // GitHub release tag
   n: string;    // display name
-  u?: string;   // LAN direct/manifest URL
+  u?: string;   // legacy LAN direct/manifest URL
+  e?: string;   // engine link (k === 'engine')
 }
 
 function b64urlEncode(s: string): string {
@@ -71,11 +84,22 @@ function b64urlDecode(s: string): string {
   while (s.length % 4) s += '=';
   return decodeURIComponent(escape(atob(s)));
 }
-export function encodeShareLink(p: SharePayload): string {
-  return 'prevplayer://share/' + b64urlEncode(JSON.stringify(p));
+/** Readable link: prevplayer://share/video|folder/<name>/<payload>. The name is
+ *  cosmetic; the trailing payload carries the actual location. */
+export function encodeShareLink(
+  p: SharePayload,
+  isFolder = p.k === 'folder' || p.k === 'lan-folder',
+): string {
+  const kind = isFolder ? 'folder' : 'video';
+  const slug = encodeURIComponent(p.n.replace(/\.[^.]+$/, '')).replace(/%20/g, '-').slice(0, 60) || kind;
+  return `prevplayer://share/${kind}/${slug}/${b64urlEncode(JSON.stringify(p))}`;
 }
 export function parseShareLink(link: string): SharePayload | null {
-  const m = link.trim().match(/prevplayer:\/\/share\/([A-Za-z0-9\-_]+)/);
+  const t = link.trim();
+  // New readable form: …/share/<video|folder>/<name>/<payload>
+  let m = t.match(/prevplayer:\/\/share\/(?:video|folder)\/[^/]*\/([A-Za-z0-9\-_]+)/);
+  // Back-compat: old …/share/<payload>
+  if (!m) m = t.match(/prevplayer:\/\/share\/([A-Za-z0-9\-_]+)\s*$/);
   if (!m) return null;
   try { const p = JSON.parse(b64urlDecode(m[1])); return p?.v === 1 ? p : null; } catch { return null; }
 }
@@ -207,77 +231,93 @@ async function writeTempManifest(json: string): Promise<string> {
 }
 
 /** Folder where received downloads are saved (…/Downloads/PREV Player). */
-export function shareDownloadDir(): Promise<string> {
-  return invoke<string>('share_download_dir');
-}
+export const shareDownloadDir = engine.downloadDir;
 
 // ---- LAN (same-Wi-Fi) sharing — ephemeral, no account, nothing stored -------
+//
+// The engine serves these itself: hash-derived ids, lazy whole-file digests so
+// the receiver can verify, and range support that actually lets them seek.
+
 export async function lanShareFile(path: string, name: string): Promise<{ link: string; id: string }> {
-  const r = await invoke<{ id: string; url: string; name: string }>('lan_share_file', { path });
-  return { link: encodeShareLink({ v: 1, k: 'lan-file', n: r.name || name, u: r.url }), id: r.id };
+  const r = await engine.shareFile(path);
+  return { link: encodeShareLink({ v: 1, k: 'engine', n: r.name || name, e: r.link }, false), id: r.id };
 }
-export async function lanShareFolder(files: { path: string; name: string }[], folderName: string): Promise<{ link: string; id: string }> {
-  const r = await invoke<{ id: string; url: string; name: string; count: number }>('lan_share_folder', {
-    paths: files.map(f => f.path), folderName,
-  });
-  return { link: encodeShareLink({ v: 1, k: 'lan-folder', n: r.name, u: r.url }), id: r.id };
+
+export async function lanShareFolder(
+  files: { path: string; name: string }[],
+  folderName: string,
+): Promise<{ link: string; id: string }> {
+  const r = await engine.shareFolder(files.map(f => f.path), folderName);
+  return { link: encodeShareLink({ v: 1, k: 'engine', n: r.name, e: r.link }, true), id: r.id };
 }
-export function lanStop(id: string): Promise<void> { return invoke('lan_stop', { id }); }
-export function lanStopAll(): Promise<void> { return invoke('lan_stop_all'); }
 
-// ---- receiver: resolve + transfer ----------------------------------------
-export interface ResolvedItem { name: string; url: string; size: number; }
-export interface ResolvedShare { kind: 'file' | 'folder'; name: string; items: ResolvedItem[]; }
+export function lanStop(id: string): Promise<void> { return engine.stopShare(id).then(() => {}); }
+export function lanStopAll(): Promise<void> { return engine.stopAllShares(); }
 
-export async function resolveShare(p: SharePayload): Promise<ResolvedShare> {
-  // LAN shares carry their URL directly — no cloud lookup, nothing stored.
-  if (p.k === 'lan-file') {
-    return { kind: 'file', name: p.n, items: [{ name: p.n, url: p.u!, size: 0 }] };
-  }
-  if (p.k === 'lan-folder') {
+// ---- receiver: any link → one engine link ---------------------------------
+
+/**
+ * Reduce whatever was pasted to a single engine link. A `prev://` or bare
+ * `http(s)://` URL passes straight through; a `prevplayer://` link is unwrapped;
+ * a GitHub share is looked up and its assets become an HTTP link.
+ *
+ * From here on the caller talks only to the engine: `resolve` for the file list,
+ * then `watch` or `download`.
+ */
+export async function toEngineLink(input: string): Promise<string> {
+  const text = input.trim();
+  if (/^(prev:\/\/|https?:\/\/)/i.test(text)) return text;
+
+  const p = parseShareLink(text);
+  if (!p) throw new Error('That doesn’t look like a PREV share link.');
+
+  // Minted by this version — the payload already is the link.
+  if (p.k === 'engine' && p.e) return p.e;
+
+  // Pre-engine LAN links: the sender is a running app on this network, and its
+  // URLs are plain HTTP, so they still resolve.
+  if (p.k === 'lan-file' && p.u) return p.u;
+  if (p.k === 'lan-folder' && p.u) {
     // Fetch the folder manifest through Rust (avoids WebView CORS on the LAN server).
     const resp = await invoke<{ status: number; body: string }>('github_api', {
-      method: 'GET', url: p.u!, token: null, body: null,
+      method: 'GET', url: p.u, token: null, body: null,
     });
     if (resp.status >= 300) throw new Error('The sharer is offline or the link expired.');
     const m = JSON.parse(resp.body);
-    const items: ResolvedItem[] = (m.items || []).map((it: any) => ({
-      name: it.name, url: `${p.u}/${it.index}`, size: it.size || 0,
+    const files = (m.items || []).map((it: any) => ({
+      name: it.name, size: it.size || 0, url: `${p.u}/${it.index}`,
     }));
-    return { kind: 'folder', name: p.n, items };
+    if (!files.length) throw new Error('This share has no playable files.');
+    return engine.httpLink(p.n, files);
   }
 
+  return githubLink(p);
+}
+
+/** Look up a GitHub share's release and turn its assets into an engine link. */
+async function githubLink(p: SharePayload): Promise<string> {
   const rel = await gh('GET', `https://api.github.com/repos/${p.r}/${SHARE_REPO}/releases/tags/${p.t}`, getShareToken());
   if (rel.status === 404) throw new Error('This shared link no longer exists (it may have been removed).');
   if (rel.status >= 300) throw new Error('Could not open share: ' + rel.raw);
   const assets: any[] = rel.json.assets || [];
 
-  // Optional manifest gives original names/order.
+  // Optional manifest gives back the original names/order (asset names are sanitized).
   const manifestAsset = assets.find(a => a.name === 'manifest.json');
   let order: string[] | null = null;
   if (manifestAsset) {
     try {
-      const m = await gh('GET', manifestAsset.url, getShareToken()); // api url returns json meta, not content
-      // fall back: fetch raw content via browser_download_url
       const raw = await invoke<{ status: number; body: string }>('github_api', {
         method: 'GET', url: manifestAsset.browser_download_url, token: getShareToken() ?? null, body: null,
       });
-      const parsed = JSON.parse(raw.body);
-      order = parsed.items || null;
-      void m;
+      order = JSON.parse(raw.body).items || null;
     } catch { /* ignore manifest errors */ }
   }
 
-  const media = assets.filter(a => a.name !== 'manifest.json')
-    .map(a => ({ name: a.name as string, url: a.browser_download_url as string, size: a.size as number }));
+  const media = assets
+    .filter(a => a.name !== 'manifest.json')
+    .map(a => ({ name: a.name as string, size: a.size as number, url: a.browser_download_url as string }));
+  if (!media.length) throw new Error('This share has no playable files.');
+  if (order) media.sort((a, b) => order!.indexOf(a.name) - order!.indexOf(b.name));
 
-  if (order) {
-    media.sort((a, b) => order!.indexOf(a.name) - order!.indexOf(b.name));
-  }
-  return { kind: p.k, name: p.n, items: media };
-}
-
-/** Stream-download an item to `destPath` (progress via the 'share-progress' event). */
-export async function downloadItem(url: string, destPath: string, id: string): Promise<void> {
-  await invoke('download_file', { url, dest: destPath, id });
+  return engine.httpLink(p.n, media);
 }

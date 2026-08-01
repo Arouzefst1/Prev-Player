@@ -301,6 +301,27 @@ interface ProgressEntry {
   updatedAt: number;
 }
 
+/**
+ * One-time purge of resume positions written by builds before the save gate.
+ *
+ * Those builds could attribute a finishing video's position to the NEXT video in
+ * the queue — storing that video's time AND duration together. The pair is
+ * self-consistent, so no ratio check can tell a corrupt entry from a real one: a
+ * 24-second short carrying {time: 2932, duration: 7019} reads as "stopped 42% in".
+ * Since the bad data is undetectable, the only honest remedy is to drop it once.
+ * Costs the user their in-progress positions a single time; leaving it in place
+ * keeps skipping videos and resuming them at the wrong place indefinitely.
+ */
+const PROGRESS_SCHEMA = 'prevplayer_progress_schema';
+const PROGRESS_SCHEMA_VERSION = '2';
+(function migrateProgressStore() {
+  try {
+    if (localStorage.getItem(PROGRESS_SCHEMA) === PROGRESS_SCHEMA_VERSION) return;
+    localStorage.removeItem(STORAGE_PROGRESS);
+    localStorage.setItem(PROGRESS_SCHEMA, PROGRESS_SCHEMA_VERSION);
+  } catch { /* storage unavailable — nothing to migrate */ }
+})();
+
 function readProgressMap(): Record<string, ProgressEntry> {
   try {
     const raw = localStorage.getItem(STORAGE_PROGRESS);
@@ -328,10 +349,27 @@ export function saveVideoProgress(videoId: string, time: number, duration: numbe
   writeProgressMap(map);
 }
 
+/** Drop a stored position (finished, or found not to belong to the file). */
+export function clearVideoProgress(videoId: string): void {
+  if (!videoId) return;
+  const map = readProgressMap();
+  if (map[videoId]) { delete map[videoId]; writeProgressMap(map); }
+}
+
 export function loadVideoProgress(videoId: string): number | null {
   if (!videoId) return null;
   const entry = readProgressMap()[videoId];
-  return entry ? entry.time : null;
+  if (!entry) return null;
+  // A position sitting at (or almost at) the end is useless as a resume point:
+  // the file would open on its final moments and hit EOF immediately, looking
+  // like it "played only the last second". Also self-heals entries written by
+  // older builds, which could file a finished video's position under the id of
+  // the NEXT video in the queue.
+  if (entry.duration > 0) {
+    if (entry.time >= entry.duration - 10) return null;
+    if (entry.time / entry.duration > 0.98) return null;
+  }
+  return entry.time;
 }
 
 // ==========================================
@@ -419,3 +457,27 @@ export const videoOrderStore = {
     try { localStorage.setItem(STORAGE_VIDEO_ORDER, JSON.stringify(ids)); } catch {}
   },
 };
+
+// ==========================================================================
+// Keyboard routing
+// ==========================================================================
+
+/**
+ * Is the keystroke destined for a text field rather than the app's shortcuts?
+ *
+ * Player shortcuts are bound to `window`, so anything typed anywhere reaches
+ * them — without this, space would both type a space AND toggle playback.
+ * Range inputs are deliberately NOT treated as typing: the seek bar and volume
+ * slider are player controls, and arrow keys should keep driving the player.
+ */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  if (el.tagName === 'INPUT') {
+    const type = (el as HTMLInputElement).type;
+    return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(type);
+  }
+  return false;
+}

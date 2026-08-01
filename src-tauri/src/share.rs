@@ -1,82 +1,12 @@
 // ===========================================================================
-// Sharing backend — GitHub Release assets as a free, lifetime, CDN-streamed store.
+// GitHub Release assets as a free, lifetime, CDN-hosted share backend.
 //
-// Rust owns the heavy transfers (streaming download WITH progress, and streaming
-// upload so large files don't blow up memory) plus a thin GitHub REST passthrough
-// (avoids WebView CORS quirks). The frontend orchestrates the flow + UI.
+// What is left here is only what the transfer engine has no opinion about: a
+// streaming upload (so a large file doesn't blow up memory) and a thin GitHub
+// REST passthrough (which avoids WebView CORS quirks). The download side used
+// to live here too; it is now `engine.rs`, because a release asset URL is an
+// ordinary range-serving HTTP source the engine can chunk, resume and verify.
 // ===========================================================================
-
-use futures_util::StreamExt;
-use std::io::Write;
-use tauri::{AppHandle, Emitter};
-
-#[derive(serde::Serialize, Clone)]
-struct Progress {
-    id: String,
-    transferred: u64,
-    total: u64,
-    done: bool,
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent("PREV-Player")
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-}
-
-/// Stream-download a URL to `dest`, emitting `share-progress` events keyed by `id`.
-#[tauri::command]
-pub async fn download_file(
-    app: AppHandle,
-    url: String,
-    dest: String,
-    id: String,
-) -> Result<(), String> {
-    let resp = client().get(&url).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("Download failed: HTTP {}", resp.status()));
-    }
-    let total = resp.content_length().unwrap_or(0);
-
-    // Ensure parent dir exists.
-    if let Some(parent) = std::path::Path::new(&dest).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut file = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
-    let mut stream = resp.bytes_stream();
-    let mut transferred: u64 = 0;
-    let mut last = std::time::Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        transferred += chunk.len() as u64;
-        if last.elapsed().as_millis() > 120 {
-            last = std::time::Instant::now();
-            let _ = app.emit(
-                "share-progress",
-                Progress {
-                    id: id.clone(),
-                    transferred,
-                    total,
-                    done: false,
-                },
-            );
-        }
-    }
-    let _ = file.flush();
-    let _ = app.emit(
-        "share-progress",
-        Progress {
-            id,
-            transferred,
-            total,
-            done: true,
-        },
-    );
-    Ok(())
-}
 
 /// Stream-upload a local file to a GitHub release asset upload URL (already
 /// containing `?name=`). Returns the created asset JSON (has `browser_download_url`).
@@ -137,27 +67,6 @@ fn uuid_like() -> String {
     format!("{:x}", n)
 }
 
-/// Suggest a downloads directory for received shares and ensure it exists.
-#[tauri::command]
-pub fn share_download_dir() -> Result<String, String> {
-    let base = dirs_download().ok_or_else(|| "no downloads dir".to_string())?;
-    let dir = base.join("PREV Player");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.to_string_lossy().to_string())
-}
-
-fn dirs_download() -> Option<std::path::PathBuf> {
-    // %USERPROFILE%\Downloads on Windows; fall back to home.
-    if let Ok(up) = std::env::var("USERPROFILE") {
-        let d = std::path::Path::new(&up).join("Downloads");
-        if d.exists() {
-            return Some(d);
-        }
-        return Some(std::path::PathBuf::from(up));
-    }
-    std::env::var("HOME").ok().map(std::path::PathBuf::from)
-}
-
 #[derive(serde::Serialize)]
 pub struct HttpResp {
     status: u16,
@@ -195,4 +104,11 @@ pub async fn github_api(
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     Ok(HttpResp { status, body: text })
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("PREV-Player")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
