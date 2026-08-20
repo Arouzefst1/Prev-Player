@@ -2,6 +2,7 @@
 name = "prev-player"
 version = "1.5.1"
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "prev_player_lib"

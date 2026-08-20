@@ -101,3 +101,32 @@ Only the signature and the public key (in `tauri.conf.json`) are ever published.
 
 The updater only moves forward and the identifier is unchanged
 (`com.prev-player.app`), so a release from here upgrades every existing install.
+
+## License
+
+**[MIT](LICENSE)** — use it, modify it, sell it, redistribute it, fork it, rebrand it,
+sublicense it. Commercial use included. No permission needed, no fees, no restrictions.
+
+The one condition is that the copyright notice travels with the code:
+
+```
+Based on PREV Player — https://github.com/Arouzefst1/Prev-Player
+Copyright (c) 2026 Arouzefst1 — MIT License
+```
+
+This covers **every release**, past and present.
+
+The engine crates under `engine/` are MIT too — the workspace has declared
+`license = "MIT"` since it was written.
+
+No warranty — the software is provided **"as is"**, with no liability for damage or data
+loss.
+
+**Redistributing the installer:** the bundled `mpv.exe` is GPL and is not ours to
+relicense. The app talks to it over IPC as a separate process, so the copyleft stops at
+that binary and never reaches this code. Keep [LICENSE.md](LICENSE.md) alongside anything
+you ship that includes it — or ship without it and let mpv come from `PATH`, in which
+case MIT is the only license involved.
+
+📄 **[LICENSE.md](LICENSE.md)** — license type, warranty warning, and the full mpv /
+third-party notice in one place.

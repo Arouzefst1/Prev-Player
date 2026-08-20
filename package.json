@@ -2,6 +2,7 @@
   "name": "prev-player",
   "private": true,
   "version": "1.5.1",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "vite-dev": "vite",
