@@ -174,3 +174,5 @@ A complete dependency inventory is available with `npm ls --all` and `cargo tree
 
 Short version: **do whatever you want, just give credit — and if you pass along the
 bundled mpv, pass along this notice with it.**
+
+Author (Arouzefst1) is not responsible for any complaints and legal claim/actions after redistribution by other entity.
