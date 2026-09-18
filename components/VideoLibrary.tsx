@@ -9,7 +9,7 @@ import {
   SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { VideoMeta, Folder, folderStore, videoOrderStore } from '../utils';
+import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore } from '../utils';
 
 // ============================================================
 // Props
@@ -26,7 +26,9 @@ interface VideoLibraryProps {
   onClose: () => void;
   onAddVideos?: () => void;
   onReorderVideos?: (orderedIds: string[]) => void;
-  onPlayFolder?: (videoIds: string[], shuffle: boolean, loop: boolean, startIndex?: number) => void;
+  onPlayFolder?: (videoIds: string[], shuffle: boolean, loop: boolean, startIndex?: number, folderId?: string) => void;
+  /** Pick this folder back up where it was left off. */
+  onResumeFolder?: (folderId: string, videoIds: string[], loop: boolean) => void;
   onAddToFolder?: (folderId: string) => void;
   onAddFolderFromPC?: () => void;
   defaultView?: 'grid' | 'list';
@@ -285,6 +287,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   onAddVideos,
   onReorderVideos,
   onPlayFolder,
+  onResumeFolder,
   onAddToFolder,
   onAddFolderFromPC,
   defaultView,
@@ -428,7 +431,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   // Play folder
   const handlePlayFolder = () => {
     if (!openFolder || openFolder.videoIds.length === 0) return;
-    onPlayFolder?.(openFolder.videoIds, folderShuffle, folderLoop);
+    onPlayFolder?.(openFolder.videoIds, folderShuffle, folderLoop, 0, openFolder.id);
   };
 
   // Folder rename (Fix #2)
@@ -580,6 +583,15 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   if (openFolder) {
     const videosNotInFolder = videos.filter(v => !openFolder.videoIds.includes(v.id));
 
+    // Where this folder was left off, if anywhere. Read on render rather than
+    // memoised: coming back from the player has to show the new spot, and this
+    // view isn't drawn while anything is playing.
+    const mark = onResumeFolder ? folderProgressStore.get(openFolder.id, openFolder.videoIds) : null;
+    const markVideo = mark ? videos.find(v => v.id === mark.videoId) : null;
+    const markPercent = mark && mark.duration > 0
+      ? Math.min(100, Math.max(0, (mark.time / mark.duration) * 100))
+      : 0;
+
     return (
       <div className="fixed inset-0 bg-black/95 z-50 flex flex-col animate-[fadeIn_0.2s_ease]">
         {/* Header */}
@@ -635,6 +647,31 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
         {/* Toolbar */}
         <div className="flex items-center gap-2 p-4 sm:px-6 border-b border-neutral-800 flex-wrap">
           <PlayAllIcon onClick={handlePlayFolder} />
+
+          {/* Pick the playlist back up on the video it was left on, at the spot
+              it was left at. Only offered when there's somewhere to go back to. */}
+          {mark && markVideo && (
+            <button
+              onClick={() => onResumeFolder!(openFolder.id, openFolder.videoIds, folderLoop)}
+              title={`Resume “${markVideo.name}” at ${formatTime(mark.time)}`}
+              className="group relative flex items-center gap-2 pl-3 pr-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-red-600/40 hover:border-red-500 text-sm font-semibold text-white transition-all active:scale-95 overflow-hidden max-w-[16rem]"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-red-400 shrink-0">
+                <path d="M3 3v5h5" />
+                <path d="M3.05 13A9 9 0 106 5.3L3 8" />
+                <polygon points="10,9 16,12 10,15" fill="currentColor" stroke="none" />
+              </svg>
+              <span className="flex flex-col items-start leading-tight min-w-0">
+                <span>Resume</span>
+                <span className="text-[11px] font-normal text-neutral-400 truncate max-w-[11rem]">
+                  {markVideo.name} · {formatTime(mark.time)}
+                </span>
+              </span>
+              {/* How far into that video the spot is. */}
+              <span className="absolute left-0 bottom-0 h-0.5 bg-red-500/80" style={{ width: `${markPercent}%` }} />
+            </button>
+          )}
+
           <ShuffleIcon active={folderShuffle} onClick={() => setFolderShuffle(!folderShuffle)} />
           <LoopIcon active={folderLoop} onClick={() => setFolderLoop(!folderLoop)} />
 
@@ -745,7 +782,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               {folderVideos.map((video, i) => (
                 <div
                   key={video.id}
-                  onClick={() => onPlayFolder?.(openFolder.videoIds, false, folderLoop, i)}
+                  onClick={() => onPlayFolder?.(openFolder.videoIds, false, folderLoop, i, openFolder.id)}
                   className="group relative rounded-lg overflow-hidden bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-red-600/20"
                 >
                   <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
@@ -822,7 +859,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                     video={video}
                     index={i}
                     numbered
-                    onPlay={(_v, idx) => onPlayFolder?.(openFolder.videoIds, false, folderLoop, idx)}
+                    onPlay={(_v, idx) => onPlayFolder?.(openFolder.videoIds, false, folderLoop, idx, openFolder.id)}
                     onRemove={removeVideoFromFolder}
                     onShare={onShareVideo}
                     onAddToQueue={onAddToQueue}

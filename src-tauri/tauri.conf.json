@@ -1,6 +1,6 @@
 {
   "productName": "PREV Player",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "identifier": "com.prev-player.app",
   "build": {
     "beforeDevCommand": "npm run vite-dev",

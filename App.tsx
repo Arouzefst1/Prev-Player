@@ -20,6 +20,7 @@ import {
   videoOrderStore,
   loadVideoProgress,
   saveVideoProgress,
+  folderProgressStore,
 } from './utils';
 
 // ---------------------------------------------------------------------------
@@ -174,6 +175,29 @@ function App() {
   const currentVideoIdRef = useRef<string | null>(null);
   useEffect(() => { currentVideoIdRef.current = playlist[currentIndex]?.id ?? null; }, [playlist, currentIndex]);
 
+  // ---------------------------------------------------------------------------
+  // Where you were in a playlist
+  //
+  // A folder remembers the video you were on AND the spot inside it, so opening
+  // the folder again offers to pick that back up. This is its own bookmark, kept
+  // apart from per-video continue-watching: that one ignores the first few
+  // seconds and forgets a finished video, while a playlist has to remember the
+  // spot exactly as it was.
+  // ---------------------------------------------------------------------------
+
+  /** The folder the current queue came from, with the membership it had then. */
+  const activeFolderRef = useRef<{ id: string; ids: string[] } | null>(null);
+  /** A one-shot position handed to the player when resuming a playlist. */
+  const [folderStartAt, setFolderStartAt] = useState<{ videoId: string; time: number } | null>(null);
+
+  const markFolderProgress = useCallback((videoId: string, time: number, duration: number) => {
+    const folder = activeFolderRef.current;
+    // Only for a video this folder actually holds — so a queue started from
+    // somewhere else can never overwrite a folder's bookmark.
+    if (!folder || !folder.ids.includes(videoId)) return;
+    folderProgressStore.save(folder.id, videoId, time, duration);
+  }, []);
+
   // Stop the native mpv engine — but SAVE the resume position first (reading it
   // straight from the live engine state), so leaving the player never loses your
   // place. `stop` unloads the file, which would otherwise reset the position to 0.
@@ -182,9 +206,13 @@ function App() {
     const id = currentVideoIdRef.current;
     if (id && s.currentTime > 0 && s.duration > 0) {
       saveVideoProgress(id, s.currentTime, s.duration);
+      // Leaving mid-video is exactly when the playlist bookmark matters, and the
+      // player's throttled reports can be up to 5s behind. Same numbers, no
+      // minimum — see markFolderProgress.
+      markFolderProgress(id, s.currentTime, s.duration);
     }
     mpvStop().catch(() => {});
-  }, []);
+  }, [markFolderProgress]);
 
   // Keep the most recently *watched* video at the top of the library (most-recent
   // first), the same way newly-added ones bubble up. Fires whenever the current
@@ -796,6 +824,7 @@ function App() {
   const playFromLibrary = useCallback(async (video: VideoMeta) => {
     const { convertFileSrc } = await import('@tauri-apps/api/core');
     const src = convertFileSrc(video.path);
+    activeFolderRef.current = null; // a single video isn't a folder's queue
     setPlaylist([{ id: video.id, src, path: video.path, name: video.name, thumbnail: video.thumbnail }]);
     setCurrentIndex(0);
     setShowLibrary(false);
@@ -1274,8 +1303,12 @@ function App() {
   }, [playlist, showToast]);
 
   // Play an entire folder/playlist, optionally starting at a specific index
-  const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean, startIndex = 0) => {
+  const playFolder = useCallback(async (videoIds: string[], shuffle: boolean, loop: boolean, startIndex = 0, folderId?: string) => {
     if (videoIds.length === 0) return;
+    // Remember which folder this queue is, so the bookmark has somewhere to go.
+    // Carrying the membership along means a later save can check the video still
+    // belongs here, without having to clear this on every other playback path.
+    activeFolderRef.current = folderId ? { id: folderId, ids: [...videoIds] } : null;
     setIsPlaylistLooping(loop);
     // This queue IS a library folder — there's nothing to bookmark until the
     // user adds something to it. (Membership, so shuffling doesn't count.)
@@ -1299,12 +1332,34 @@ function App() {
     }
     if (items.length > 0) {
       setPlaylist(items);
-      // On shuffle the start position is meaningless; otherwise honour the requested index
-      setCurrentIndex(shuffle ? 0 : Math.min(startIndex, items.length - 1));
+      // On shuffle the start position is meaningless; otherwise honour the request.
+      // `startIndex` counts into the FOLDER, while the queue skips ids the library
+      // no longer has — so translate through the id, or a folder with a missing
+      // entry starts on the wrong video (and a resume lands on the wrong one).
+      const wantedId = videoIds[startIndex];
+      const resolved = wantedId ? items.findIndex(i => i.id === wantedId) : -1;
+      setCurrentIndex(shuffle ? 0 : (resolved >= 0 ? resolved : Math.min(startIndex, items.length - 1)));
       setShouldAutoPlay(true);
       setShowLibrary(false);
     }
   }, [videoLibrary]);
+
+  /**
+   * "Resume playlist": open the folder at the video it was left on and carry on
+   * from that exact spot. Never shuffled — resuming means continuing the order
+   * you were in, and the rest of the folder plays on from there.
+   */
+  const resumeFolder = useCallback(async (folderId: string, videoIds: string[], loop: boolean) => {
+    const mark = folderProgressStore.get(folderId, videoIds);
+    if (!mark) return;
+    const index = videoIds.indexOf(mark.videoId);
+    if (index < 0) return;
+    // Right at the end there's nothing left to resume — start that video over
+    // rather than opening it on its last moments (which just hits the end).
+    const time = mark.duration > 0 && mark.time >= mark.duration - 1 ? 0 : mark.time;
+    setFolderStartAt(time > 0 ? { videoId: mark.videoId, time } : null);
+    await playFolder(videoIds, false, loop, index, folderId);
+  }, [playFolder]);
 
   const deleteFromLibrary = useCallback(async (id: string) => {
     await videoStore.delete(id);
@@ -1603,6 +1658,9 @@ function App() {
               autoPlay={shouldAutoPlay}
               isAudio={isAudioPath(playlist[currentIndex].name)}
               resumeEnabled={settings.resumePlayback}
+              onProgress={markFolderProgress}
+              startAt={folderStartAt}
+              onStartAtUsed={() => setFolderStartAt(null)}
               defaultVolume={settings.defaultVolume}
               defaultSpeed={settings.defaultSpeed}
               pipAutoplayQueue={settings.pipAutoplayQueue}
@@ -1703,6 +1761,7 @@ function App() {
               onAddVideos={handleAddFilesViaDialog}
               onReorderVideos={handleReorderVideos}
               onPlayFolder={playFolder}
+              onResumeFolder={resumeFolder}
               onAddToFolder={handleAddToFolder}
               onAddFolderFromPC={handleAddFolderFromPC}
               defaultView={settings.defaultView}
@@ -1870,6 +1929,7 @@ function App() {
           onAddVideos={handleAddFilesViaDialog}
           onReorderVideos={handleReorderVideos}
           onPlayFolder={playFolder}
+          onResumeFolder={resumeFolder}
           onAddToFolder={handleAddToFolder}
           onAddFolderFromPC={handleAddFolderFromPC}
           defaultView={settings.defaultView}

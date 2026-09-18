@@ -113,6 +113,20 @@ interface VideoPlayerProps {
   playlistLooping?: boolean;
   /** Report the queue-loop state up — App owns the wrap-around at the end. */
   onPlaylistLoopChange?: (loop: boolean) => void;
+  /**
+   * Told where playback actually is, for the video mpv has CONFIRMED open.
+   * Fires alongside the existing resume bookkeeping and on the same terms, so
+   * whoever listens gets positions that are already attributed to the right
+   * file — with no minimum position, unlike continue-watching.
+   */
+  onProgress?: (videoId: string, time: number, duration: number) => void;
+  /**
+   * Open the next file AT this position instead of wherever continue-watching
+   * would put it — how "Resume playlist" lands mid-video. Applies only to the
+   * matching video and only once; `onStartAtUsed` is called when it's spent.
+   */
+  startAt?: { videoId: string; time: number } | null;
+  onStartAtUsed?: () => void;
   /** Save the current queue to the library as a named folder. */
   onSaveQueue?: (name: string) => void;
   /** This exact set of videos was already saved — hide the save offer. */
@@ -312,6 +326,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   resumeEnabled = true,
   defaultVolume = 1,
   defaultSpeed = 1,
+  onProgress,
+  startAt,
+  onStartAtUsed,
   pipAutoplayQueue = true,
   playlistLooping,
   onPlaylistLoopChange,
@@ -441,6 +458,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // speed from here rather than closing over a stale prop.
   const defaultSpeedRef = useRef(defaultSpeed);
   const isAudioRef = useRef(isAudio);
+  // Same reason as the rest: the mpv subscription is mounted once, and the load
+  // effect only re-runs on `path`, so both read these through refs.
+  const onProgressRef = useRef(onProgress);
+  const startAtRef = useRef(startAt);
+  const onStartAtUsedRef = useRef(onStartAtUsed);
   useEffect(() => { isDraggingRef.current = isDragging; }, [isDragging]);
   useEffect(() => { isPipRef.current = isPip; }, [isPip]);
   useEffect(() => {
@@ -454,6 +476,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     isAudioRef.current = isAudio;
     inputSuspendedRef.current = !!inputSuspended;
     defaultSpeedRef.current = defaultSpeed;
+    onProgressRef.current = onProgress;
+    startAtRef.current = startAt;
+    onStartAtUsedRef.current = onStartAtUsed;
   });
 
   // An overlay (library / settings) just took over: drop any click gesture still in
@@ -543,6 +568,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (s.paused && canSave) {
             lastProgressSaveRef.current = Date.now();
             saveVideoProgress(trackedId!, s.currentTime, s.duration);
+            onProgressRef.current?.(trackedId!, s.currentTime, s.duration);
           }
         }
 
@@ -551,6 +577,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (canSave && now - lastProgressSaveRef.current > 5000) {
           lastProgressSaveRef.current = now;
           saveVideoProgress(trackedId!, s.currentTime, s.duration);
+          onProgressRef.current?.(trackedId!, s.currentTime, s.duration);
         }
 
         // End-of-file → advance the playlist (once per file). In the mini-player
@@ -677,14 +704,24 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       // Resolve the resume position BEFORE loading, so mpv opens the file AT it
       // (a seek fired after load gets dropped on some setups; the start option won't).
-      let startAt = 0;
-      if (resumeEnabledRef.current && videoId) {
+      //
+      // A playlist resume (`startAt`) wins: it names both the video and the spot,
+      // the user just asked for it, and it carries positions continue-watching
+      // would refuse (the first few seconds). It's spent on use, so replaying the
+      // same clip later goes back to the ordinary rules.
+      let startSeconds = 0;
+      const override = startAtRef.current;
+      const usingOverride = !!override && !!videoId && override.videoId === videoId && override.time > 0;
+      if (usingOverride) {
+        startSeconds = override!.time;
+        onStartAtUsedRef.current?.();
+      } else if (resumeEnabledRef.current && videoId) {
         const saved = loadVideoProgress(videoId);
-        if (saved && saved >= 5) startAt = saved;
+        if (saved && saved >= 5) startSeconds = saved;
       }
 
       try {
-        await mpvLoad(path, startAt);
+        await mpvLoad(path, startSeconds);
       } catch (e: any) {
         if (cancelled) return;
         console.error('mpv load failed:', e);
@@ -707,22 +744,25 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // build carries another video's time AND duration, so it looks perfectly
       // consistent on its own yet lands past the end of THIS file — which opens it
       // at EOF and instantly advances, skipping the video entirely.
-      if (startAt > 0) {
+      // (Skipped for a playlist resume: that position was just written against
+      // this very file, so there's nothing to self-heal — and the repair clears
+      // the continue-watching entry, which isn't ours to throw away here.)
+      if (startSeconds > 0 && !usingOverride) {
         const realDuration = await mpvGetDuration();
         if (cancelled) return;
-        if (realDuration > 0 && startAt >= realDuration - 10) {
-          console.warn(`[resume] stored position ${startAt.toFixed(1)}s doesn't fit this file (${realDuration.toFixed(1)}s) — restarting from 0`);
+        if (realDuration > 0 && startSeconds >= realDuration - 10) {
+          console.warn(`[resume] stored position ${startSeconds.toFixed(1)}s doesn't fit this file (${realDuration.toFixed(1)}s) — restarting from 0`);
           if (videoId) clearVideoProgress(videoId);
           await mpvSeekAbsolute(0).catch(() => {});
           setCurrentTime(0);
-          startAt = 0;
+          startSeconds = 0;
         }
       }
 
       // Offer "Start over" since we resumed partway in.
-      if (startAt > 0) {
-        setCurrentTime(startAt);
-        setResumeFrom(startAt);
+      if (startSeconds > 0) {
+        setCurrentTime(startSeconds);
+        setResumeFrom(startSeconds);
         if (resumePromptTimerRef.current) clearTimeout(resumePromptTimerRef.current);
         resumePromptTimerRef.current = setTimeout(() => setResumeFrom(null), 5000);
       }

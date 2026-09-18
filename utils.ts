@@ -400,6 +400,75 @@ function writeFolders(folders: Folder[]) {
   } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// Where you were in a playlist.
+//
+// Deliberately SEPARATE from the per-video continue-watching map above, which
+// answers a different question ("if I open this file again, where was I?") and
+// has rules to match: it ignores the first 5 seconds and forgets a video once
+// it's ~finished. A playlist bookmark has to remember the spot no matter how
+// short it is, and it also has to remember WHICH video — so it gets its own
+// store rather than bending the other one's rules.
+// ---------------------------------------------------------------------------
+
+export interface FolderProgress {
+  /** The video that was playing (a library video id). */
+  videoId: string;
+  /** Position within that video, in seconds — stored as-is, even if tiny. */
+  time: number;
+  duration: number;
+  updatedAt: number;
+}
+
+const STORAGE_FOLDER_PROGRESS = 'prevplayer_folder_progress';
+
+function readFolderProgress(): Record<string, FolderProgress> {
+  try {
+    const raw = localStorage.getItem(STORAGE_FOLDER_PROGRESS);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeFolderProgress(map: Record<string, FolderProgress>) {
+  try {
+    localStorage.setItem(STORAGE_FOLDER_PROGRESS, JSON.stringify(map));
+  } catch {}
+}
+
+export const folderProgressStore = {
+  /** Remember the spot. No minimum: two seconds in still counts. */
+  save(folderId: string, videoId: string, time: number, duration: number): void {
+    if (!folderId || !videoId) return;
+    if (!isFinite(time) || time <= 0 || !isFinite(duration) || duration <= 0) return;
+    const map = readFolderProgress();
+    map[folderId] = { videoId, time, duration, updatedAt: Date.now() };
+    writeFolderProgress(map);
+  },
+
+  /**
+   * The bookmark, or null if there isn't a usable one. `knownIds` is the
+   * folder's current contents: a video that has since been removed from the
+   * folder can't be resumed, and saying so here keeps the button from
+   * appearing at all.
+   */
+  get(folderId: string, knownIds?: string[]): FolderProgress | null {
+    if (!folderId) return null;
+    const entry = readFolderProgress()[folderId];
+    if (!entry || !entry.videoId) return null;
+    if (knownIds && !knownIds.includes(entry.videoId)) return null;
+    return entry;
+  },
+
+  clear(folderId: string): void {
+    if (!folderId) return;
+    const map = readFolderProgress();
+    if (map[folderId]) { delete map[folderId]; writeFolderProgress(map); }
+  },
+};
+
 export const folderStore = {
   getAll(): Folder[] { return readFolders(); },
 
@@ -412,6 +481,7 @@ export const folderStore = {
 
   delete(id: string): void {
     writeFolders(readFolders().filter(f => f.id !== id));
+    folderProgressStore.clear(id); // don't leave a bookmark for a folder that's gone
   },
 
   rename(id: string, name: string): void {
