@@ -403,6 +403,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const overlayCounterRef = useRef(0);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  /** Bumped by "Try Again" so the file-load effect re-runs for the same path. */
+  const [reloadRequest, setReloadRequest] = useState(0);
   const [codecSupport, setCodecSupport] = useState<Record<string, boolean>>({});
   // MX Player–style resume prompt: the time (sec) we resumed from, or null when hidden.
   const [resumeFrom, setResumeFrom] = useState<number | null>(null);
@@ -489,7 +491,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       get playbackRate() { return mpvStateRef.current.speed; },
       set defaultPlaybackRate(_r: number) { /* mpv re-applies speed per file */ },
       get defaultPlaybackRate() { return mpvStateRef.current.speed; },
-      set loop(l: boolean) { mpvSetLoop(l); },
+      set loop(l: boolean) { mpvSetLoop(l).catch(report('loop')); },
       get loop() { return false; },
     };
     videoRef.current = adapter;
@@ -727,7 +729,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [path, reloadRequest]);
 
   // "Start over" → restart from the beginning and dismiss the prompt.
   const handleStartOver = useCallback(() => {
@@ -1825,12 +1827,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
             <p className="text-sm text-neutral-300 mb-4">{errorMessage}</p>
             
-            {/* Retry Button — reload the current file into mpv */}
+            {/* Retry Button — re-run the real load path. A bare loadfile here
+                skipped the resume position, never confirmed the file for
+                progress saving, and left the queue unable to advance at the end. */}
             <button
               onClick={() => {
                 setHasError(false);
                 setErrorMessage('');
-                if (path) mpvLoad(path).catch(() => {});
+                setReloadRequest(n => n + 1);
               }}
               className="w-full mb-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors active:scale-95"
             >

@@ -46,6 +46,8 @@ export interface MpvState {
   cacheAhead?: number;
   /** Frames the decoder couldn't keep up with. Climbing = too slow to play. */
   droppedFrames?: number;
+  /** Audio output driver mpv has open ("wasapi"), or null while it has none. */
+  audioOutput?: string | null;
   // --- for the Properties panel ---
   width?: number;
   height?: number;
@@ -54,14 +56,17 @@ export interface MpvState {
   fileSize?: number;
 }
 
-// Properties we ask mpv to push to us on change. The last four are diagnostic:
-// a file that opens (right duration) but never advances is either starved of
-// data or decoding too slowly to display, and these tell the two apart.
+// Properties we ask mpv to push to us on change. The diagnostic four (hwdec…
+// frame-drop-count) tell "starved of data" apart from "decoding too slowly".
+// `current-ao` and `audio-device-list` drive the audio-output recovery below;
+// observing `audio-device-list` is also what makes mpv listen for device
+// hotplug at all.
 const OBSERVED = [
   'pause', 'time-pos', 'duration', 'volume', 'mute', 'speed', 'eof-reached', 'filename',
   'track-list', 'aid', 'sid', 'dwidth', 'dheight',
   'hwdec-current', 'video-codec', 'demuxer-cache-duration', 'frame-drop-count',
   'container-fps', 'file-format', 'file-size',
+  'current-ao', 'audio-device-list',
 ] as const;
 
 let _dw = 0; let _dh = 0;
@@ -107,6 +112,66 @@ export function subscribeMpv(cb: (s: MpvState) => void): () => void {
 
 export function getMpvState(): MpvState {
   return { ...state };
+}
+
+// ---------------------------------------------------------------------------
+// Audio-output recovery.
+//
+// When the audio device changes (headphones in/out, a Bluetooth headset
+// reconnecting) mpv closes its WASAPI output and re-opens it on the new default
+// device. If that re-open fails — and right after a reconnect it often does,
+// because Windows is still bringing the endpoint up — mpv logs "Could not
+// open/initialize audio device -> no sound", DESELECTS the audio track and never
+// tries again. The video keeps playing in silence until a new file is loaded.
+//
+// mpv does not reflect that in `aid` (it keeps reporting the old id); the only
+// signal is `track-list`, where the audio track is now selected=false. So we
+// watch for "has an audio track, none selected" and re-select the track, which
+// rebuilds the audio chain and re-opens the device. Attempts back off, because
+// the device can take a few seconds to settle, and stop after a handful so a
+// file whose audio genuinely cannot play is not retried forever. Any change to
+// `audio-device-list` — the device coming back — starts a fresh round.
+// Verified against the bundled mpv by forcing the re-open to fail over IPC.
+// ---------------------------------------------------------------------------
+
+const AUDIO_RECOVERY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000];
+let audioRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+let audioRecoveryAttempt = 0;
+
+/** The open file has audio, and mpv is not playing any of it. */
+function audioDropped(): boolean {
+  const audio = state.tracks.filter(t => t.type === 'audio');
+  return audio.length > 0 && !audio.some(t => t.selected);
+}
+
+function cancelAudioRecovery(): void {
+  if (audioRecoveryTimer) { clearTimeout(audioRecoveryTimer); audioRecoveryTimer = null; }
+  audioRecoveryAttempt = 0;
+}
+
+function scheduleAudioRecovery(): void {
+  if (audioRecoveryTimer) return;                                       // one attempt in flight
+  if (audioRecoveryAttempt >= AUDIO_RECOVERY_DELAYS_MS.length) return;  // gave up until a device change
+  const delay = AUDIO_RECOVERY_DELAYS_MS[audioRecoveryAttempt++];
+  audioRecoveryTimer = setTimeout(async () => {
+    audioRecoveryTimer = null;
+    if (!audioDropped()) { audioRecoveryAttempt = 0; return; }          // came back, or file changed
+    // Prefer the track that was playing (aid still names it), else the first one.
+    const audio = state.tracks.filter(t => t.type === 'audio');
+    const id = audio.some(t => t.id === state.audioId) ? state.audioId! : audio[0].id;
+    console.warn(`[mpv] audio output lost — re-selecting audio track ${id} `
+      + `(attempt ${audioRecoveryAttempt}/${AUDIO_RECOVERY_DELAYS_MS.length})`);
+    try { await setProperty('aid', id as any); }
+    catch (e) { console.error('[mpv] audio recovery: could not re-select the track', e); }
+    // If the device still is not ready mpv drops the track again; that arrives
+    // as another track-list update and queues the next, slower attempt.
+  }, delay);
+}
+
+/** An audio device appeared or disappeared: whatever came before, start over. */
+function onAudioDevicesChanged(): void {
+  cancelAudioRecovery();
+  if (audioDropped()) scheduleAudioRecovery();
 }
 
 /**
@@ -172,6 +237,10 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
       await retry(() => setProperty('pause', true), 25, 120);
     } catch (e) {
       console.error('[mpv] started but never accepted IPC commands', e);
+      // Tear the half-started instance down BEFORE allowing a retry: the next
+      // init() would otherwise spawn a rival mpv that fights this one for the
+      // window (see the NOTE above).
+      await destroy().catch(() => {});
       initPromise = null;
       return false;
     }
@@ -198,6 +267,12 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
         case 'video-codec':            state.videoCodec = typeof data === 'string' ? data : undefined; break;
         case 'demuxer-cache-duration': state.cacheAhead = typeof data === 'number' ? data : undefined; break;
         case 'frame-drop-count':       state.droppedFrames = typeof data === 'number' ? data : undefined; break;
+        case 'current-ao':
+          state.audioOutput = typeof data === 'string' && data ? data : null;
+          // An output is open again: the recovery (if any) worked, reset its budget.
+          if (state.audioOutput) cancelAudioRecovery();
+          break;
+        case 'audio-device-list': onAudioDevicesChanged(); break;
         case 'track-list':
           if (Array.isArray(data)) {
             state.tracks = data.map((t: any) => ({
@@ -205,6 +280,7 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
               selected: !!t.selected, codec: t.codec,
               channels: t['demux-channel-count'] ?? undefined,
             }));
+            if (audioDropped()) scheduleAudioRecovery();
           }
           break;
       }
@@ -231,6 +307,7 @@ async function ready(): Promise<boolean> {
 }
 
 export async function mpvLoad(path: string, startSeconds = 0): Promise<void> {
+  cancelAudioRecovery();
   state.ended = false;
   state.tracks = []; state.audioId = null; state.subId = null;
   state.videoAspect = null; _dw = 0; _dh = 0;
@@ -364,12 +441,14 @@ export async function mpvSetSubtitleVisible(visible: boolean): Promise<void> {
 }
 
 export async function mpvStop(): Promise<void> {
+  cancelAudioRecovery();
   if (!initialized) return; // never start mpv just to stop it
   await command('stop');
 }
 
 /** Tear down the engine (on app exit / leaving the player for good). */
 export async function shutdownMpv(): Promise<void> {
+  cancelAudioRecovery();
   if (unlisten) { unlisten(); unlisten = null; }
   if (initialized) { await destroy().catch(() => {}); initialized = false; initPromise = null; }
 }

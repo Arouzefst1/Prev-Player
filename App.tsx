@@ -1,5 +1,5 @@
 ﻿import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { Update } from '@tauri-apps/plugin-updater';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight, RefreshCw, Share2, Settings } from 'lucide-react';
 import { isTypingTarget } from './utils';
 import VideoPlayer from './components/VideoPlayer';
@@ -9,7 +9,7 @@ import DownloadsPanel from './components/DownloadsPanel';
 import SettingsModal from './components/SettingsModal';
 import PropertiesModal, { type PropertiesTarget } from './components/PropertiesModal';
 import { useSettings } from './settings';
-import { mpvStop, getMpvState } from './mpv';
+import { mpvStop, getMpvState, shutdownMpv } from './mpv';
 import * as engine from './engine';
 import {
   srtToVtt,
@@ -133,7 +133,9 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState(0); // 0–100, –1 = indeterminate
   const [appVersion, setAppVersion] = useState('');
   const [manualCheck, setManualCheck] = useState<'idle' | 'checking' | 'uptodate' | 'error'>('idle');
-  const updateRef = useRef<Update | null>(null);
+  /** What the backend knows about a newer release (see src-tauri/src/updater.rs). */
+  type UpdateInfo = { version: string; currentVersion: string; notes?: string; quiet: boolean; downloaded: boolean };
+  const updateRef = useRef<UpdateInfo | null>(null);
   const isFullscreenRef = useRef(false);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
@@ -248,34 +250,52 @@ function App() {
   // ---------------------------------------------------------------------------
   // Silent updates
   //
-  // Fixes shouldn't cost the user a dialog: an update found by the launch check is
-  // downloaded and installed in the background, then the app restarts into it. The
-  // one hard rule is that it must never interrupt playback — so it only runs while
-  // nothing is loaded (the home screen, which is also where you are at launch). If
-  // a video is open the install waits for the app to go idle, and failing that the
-  // next launch picks it up again. A manual check still shows the dialog, since
-  // that one the user asked for.
-  const pendingSilentUpdateRef = useRef(false);
-  const silentInstallRef = useRef(false);
+  // Fixes shouldn't cost the user a dialog, a restart, or even a glance. An update
+  // found by the automatic checks is downloaded in the background and installed
+  // the moment the app is closed — silently, and without relaunching, so the next
+  // launch is simply the new version. A small release (patch bump) says nothing
+  // at all; a bigger one gets a toast with a "Restart now" shortcut. A manual
+  // check still shows the dialog, since that one the user asked for.
+  //
+  // The backend (src-tauri/src/updater.rs) holds the downloaded package and runs
+  // the installer; `update_install` exits the process on success.
 
-  const installUpdateSilently = useCallback(async () => {
+  /** The release sitting in memory, installed quietly when the app is closed. */
+  const readyUpdateRef = useRef<UpdateInfo | null>(null);
+  const installingRef = useRef(false);
+
+  // "Update now": fetch (or reuse) the package with the dialog's progress bar,
+  // install it silently and come back up in the new version.
+  const installUpdate = useCallback(async () => {
     const update = updateRef.current;
-    if (!update || silentInstallRef.current) return;
-    silentInstallRef.current = true;
+    if (!update || installingRef.current) return;
+    installingRef.current = true;
+    let unlisten: (() => void) | null = null;
     try {
-      console.info(`[updater] installing v${update.version} in the background`);
-      showToast(`Updating to v${update.version} — restarting…`);
-      await update.downloadAndInstall();
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
+      setUpdateStatus('downloading');
+      setUpdateProgress(update.downloaded ? 100 : -1);
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<{ downloaded: number; total: number | null }>('update-progress', ({ payload }) => {
+        setUpdateProgress(payload.total ? Math.min(100, Math.round((payload.downloaded / payload.total) * 100)) : -1);
+      });
+      const fetched = await tauriInvoke<UpdateInfo | null>('update_check', { download: true });
+      if (!fetched) throw new Error('the release is no longer available');
+      readyUpdateRef.current = null; // being installed right now, not on close
+      setUpdateProgress(100);
+      setUpdateStatus('installing');
+      // Save the position and take mpv down first: the process is about to be
+      // replaced, and a child mpv would otherwise outlive it.
+      stopEngine();
+      await shutdownMpv();
+      await tauriInvoke('update_install', { relaunch: true }); // exits; the installer relaunches
     } catch (e) {
-      // Don't let a failed silent install swallow the update — fall back to the
-      // dialog so it can still be applied by hand.
-      console.warn('[updater] background install failed:', e);
-      silentInstallRef.current = false;
-      setUpdateBanner({ version: update.version, notes: update.body });
+      console.error('[updater] update failed:', e);
+      setUpdateStatus('error');
+    } finally {
+      unlisten?.();
+      installingRef.current = false;
     }
-  }, [showToast]);
+  }, [stopEngine]);
 
   // Ask the Tauri updater whether a newer (signed) release exists; show the dialog if so.
   // Shared by the startup auto-check and the manual "Check for updates" button — so a user
@@ -285,23 +305,28 @@ function App() {
   const runUpdateCheck = useCallback(async (manual: boolean): Promise<'found' | 'none' | 'failed'> => {
     if (manual) setManualCheck('checking');
     try {
-      const { check } = await import('@tauri-apps/plugin-updater');
-      const update = await check();
-      if (update) {
-        console.info(`[updater] update available: v${update.version}`);
-        updateRef.current = update;
+      // Automatic checks download straight away; a manual one only looks, and the
+      // dialog's "Update Now" fetches with a progress bar.
+      const info = await tauriInvoke<UpdateInfo | null>('update_check', { download: !manual });
+      if (info) {
+        console.info(`[updater] update available: v${info.version}${info.quiet ? ' (quiet)' : ''}`);
+        updateRef.current = info;
         setUpdateStatus('idle');
         setUpdateProgress(0);
         if (manual) {
-          setUpdateBanner({ version: update.version, notes: update.body });
+          setUpdateBanner({ version: info.version, notes: info.notes });
           setManualCheck('idle');
           // The update dialog sits below the settings modal, so get out of its way.
           setShowSettings(false);
-        } else if (playlistRef.current.length === 0) {
-          installUpdateSilently();
-        } else {
-          // Mid-video: hold it until the player is idle again.
-          pendingSilentUpdateRef.current = true;
+        } else if (info.downloaded) {
+          const announce = !info.quiet && readyUpdateRef.current?.version !== info.version;
+          readyUpdateRef.current = info;
+          if (announce) {
+            showToast(`PREV Player v${info.version} is ready — it installs when you close the app`, {
+              label: 'Restart now',
+              run: () => { setUpdateBanner({ version: info.version, notes: info.notes }); installUpdate(); },
+            });
+          }
         }
         return 'found';
       }
@@ -322,15 +347,52 @@ function App() {
       }
       return 'failed';
     }
-  }, [installUpdateSilently]);
+  }, [installUpdate, showToast]);
 
-  // An update held back because a video was open — apply it the moment the player
-  // goes idle (closing the video / going home), not while something is playing.
+  // Keep looking while the app stays open: a player left running for days would
+  // otherwise never see a release. Every 6 hours is plenty — a check is one small
+  // request, and a release already in memory is not downloaded twice.
   useEffect(() => {
-    if (playlist.length > 0 || !pendingSilentUpdateRef.current) return;
-    pendingSilentUpdateRef.current = false;
-    installUpdateSilently();
-  }, [playlist.length, installUpdateSilently]);
+    const timer = setInterval(() => {
+      if (settingsRef.current.autoCheckUpdates) runUpdateCheck(false);
+    }, 6 * 60 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [runUpdateCheck]);
+
+  // Install on the way out. Closing the window is the one moment an install can't
+  // interrupt anything, so a release downloaded earlier is applied right here —
+  // silently, and WITHOUT relaunching: the user closed the app, so it stays closed.
+  // Listening for the close request means the window no longer closes by itself;
+  // it is destroyed once the install has been handed off (or if there was nothing
+  // to do). mpv is shut down first so it can't outlive the app.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        const off = await win.onCloseRequested(async (event) => {
+          const ready = readyUpdateRef.current;
+          if (!ready) return; // nothing pending: the window closes as usual
+          event.preventDefault();
+          readyUpdateRef.current = null;
+          try {
+            stopEngine();
+            await shutdownMpv();
+            await tauriInvoke('update_install', { relaunch: false }); // exits the process
+          } catch (e) {
+            console.warn('[updater] install on close failed — closing normally:', e);
+          }
+          await win.destroy().catch(() => {});
+        });
+        if (disposed) off(); else unlisten = off;
+      } catch (e) {
+        console.warn('[updater] could not hook the window close:', e);
+      }
+    })();
+    return () => { disposed = true; unlisten?.(); };
+  }, [stopEngine]);
 
   useEffect(() => {
     // Grab the running version for display, then auto-check shortly after launch.
@@ -1450,39 +1512,8 @@ function App() {
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
-  // Download + install the pending update, then relaunch into the new version.
-  const handleInstallUpdate = async () => {
-    const update = updateRef.current;
-    if (!update || updateStatus === 'downloading' || updateStatus === 'installing') return;
-    try {
-      setUpdateStatus('downloading');
-      setUpdateProgress(0);
-      let downloaded = 0;
-      let total = 0;
-      await update.downloadAndInstall((event) => {
-        switch (event.event) {
-          case 'Started':
-            total = event.data.contentLength ?? 0;
-            setUpdateProgress(total > 0 ? 0 : -1); // -1 => indeterminate (no length header)
-            break;
-          case 'Progress':
-            downloaded += event.data.chunkLength ?? 0;
-            if (total > 0) setUpdateProgress(Math.min(100, Math.round((downloaded / total) * 100)));
-            break;
-          case 'Finished':
-            setUpdateProgress(100);
-            setUpdateStatus('installing');
-            break;
-        }
-      });
-      // Installer ran successfully — restart so the user lands on the new build.
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
-    } catch (e) {
-      console.error('Update failed:', e);
-      setUpdateStatus('error');
-    }
-  };
+  // The dialog's "Update Now": download + install, then relaunch into the new version.
+  const handleInstallUpdate = installUpdate;
 
   const dismissUpdate = () => {
     setUpdateBanner(null);

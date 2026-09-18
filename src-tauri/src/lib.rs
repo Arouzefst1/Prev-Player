@@ -5,6 +5,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 mod engine;
 mod share;
+mod updater;
 
 struct InitialFiles(Mutex<Vec<String>>);
 
@@ -44,6 +45,8 @@ pub fn run() {
         .plugin(tauri_plugin_mpv::init())
         .plugin(tauri_plugin_deep_link::init())
         .manage(InitialFiles(Mutex::new(initial_files)))
+        // A downloaded release waiting to be installed (see updater.rs).
+        .manage(updater::UpdateState::default())
         // Single-instance: if a second instance is opened (e.g. user opens another video
         // file, or a prevplayer:// deep-link), forward the args to the running window.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -108,7 +111,10 @@ pub fn run() {
             engine::engine_finish_save,
             engine::engine_download_dir,
             engine::engine_tuning,
-            engine::engine_set_tuning
+            engine::engine_set_tuning,
+            updater::update_check,
+            updater::update_pending,
+            updater::update_install
         ])
         .build(tauri::generate_context!())
         .expect("error while running PREV Player")
