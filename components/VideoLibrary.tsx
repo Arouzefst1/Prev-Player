@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Trash2, Search, Grid, List, X, ChevronLeft, Share2, Home, ListPlus, Settings } from 'lucide-react';
 import {
-  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
-  useDndContext,
-  type DragEndEvent,
+  DndContext, closestCenter, PointerSensor, MouseSensor, TouchSensor, useSensor, useSensors,
+  useDndContext, DragOverlay, defaultDropAnimationSideEffects,
+  type DragEndEvent, type DragStartEvent, type DropAnimation,
 } from '@dnd-kit/core';
 import {
-  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+  SortableContext, verticalListSortingStrategy, rectSortingStrategy, useSortable, arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore, applyVideoOrder } from '../utils';
@@ -272,6 +272,60 @@ const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
 };
 
 // ============================================================
+// Folder reordering — drag a folder card itself; there is no handle.
+//
+// The card stays put as a frosted, empty slot while a glass copy of it follows
+// the pointer (the DragOverlay), and the other cards slide aside to show where
+// it will land. The glass copy lifts in on pick-up and settles flat as it drops
+// into place — the lift is a CSS transition, so it eases both ways (styles.css).
+// ============================================================
+
+/** The other cards make room on this curve rather than dnd-kit's plain ease. */
+const FOLDER_SHIFT = { duration: 280, easing: 'cubic-bezier(0.25, 1, 0.5, 1)' };
+
+const FOLDER_DROP: DropAnimation = {
+  duration: 260,
+  easing: 'cubic-bezier(0.25, 1, 0.5, 1)',
+  sideEffects: defaultDropAnimationSideEffects({
+    // Lets styles.css flatten the lifted glass while it flies home.
+    className: { dragOverlay: 'folder-dropping' },
+  }),
+};
+
+const SortableFolderCard: React.FC<{ id: string; disabled?: boolean; children: React.ReactNode }> = ({
+  id, disabled, children,
+}) => {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id, disabled, transition: FOLDER_SHIFT,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      // The card inside is the focusable control; the wrapper only carries the drag.
+      tabIndex={-1}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      className="relative rounded-xl outline-none"
+    >
+      {isDragging && <div className="folder-slot absolute inset-0 rounded-xl pointer-events-none" />}
+      <div className={isDragging ? 'opacity-0' : undefined}>{children}</div>
+    </div>
+  );
+};
+
+/** The copy under the pointer. Lifts one frame after mounting so the
+ *  transition has a starting point to animate from. */
+const GlassFolder: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [lifted, setLifted] = useState(false);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setLifted(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return <div className={`folder-glass rounded-xl p-4 cursor-grabbing ${lifted ? 'is-lifted' : ''}`}>{children}</div>;
+};
+
+// ============================================================
 // Main Component
 // ============================================================
 
@@ -333,6 +387,14 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameFolderValue, setRenameFolderValue] = useState('');
 
+  // Folder reordering. A mouse drags after 8px, so a click still opens the
+  // folder; a finger has to press and hold, so a swipe still scrolls the grid.
+  const folderSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 8 } }),
+  );
+  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null);
+
   // Load persisted order on mount; videos the order doesn't know yet go on top
   useEffect(() => {
     setOrderedVideos(applyVideoOrder(videos, videoOrderStore.getOrder()));
@@ -391,6 +453,19 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
     setFolders(folderStore.getAll());
     setCreatingFolder(false);
     setNewFolderName('');
+  };
+
+  const handleFolderDragStart = ({ active }: DragStartEvent) => setDraggingFolderId(String(active.id));
+
+  const handleFolderDragEnd = ({ active, over }: DragEndEvent) => {
+    setDraggingFolderId(null);
+    if (!over || active.id === over.id) return;
+    const from = folders.findIndex(f => f.id === active.id);
+    const to = folders.findIndex(f => f.id === over.id);
+    if (from < 0 || to < 0) return;
+    const next = arrayMove(folders, from, to);
+    setFolders(next);
+    folderStore.reorder(next.map(f => f.id));
   };
 
   const deleteFolder = (id: string) => {
@@ -495,6 +570,66 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   // ============================================================
   // Render helpers
   // ============================================================
+
+  /** A folder card's face: thumbnail mosaic, name and count. `interactive` is
+   *  false for the glass copy being dragged, which can't be renamed. */
+  const renderFolderFace = (folder: Folder, interactive: boolean) => {
+    const fvids = folder.videoIds.map(id => videos.find(v => v.id === id)).filter(Boolean) as VideoMeta[];
+    const thumbs = fvids.slice(0, 4);
+    return (
+      <>
+        {/* Thumbnail mosaic */}
+        <div className="grid grid-cols-2 gap-1 rounded-lg overflow-hidden mb-3 aspect-video bg-neutral-900">
+          {thumbs.length > 0 ? thumbs.map((v, i) => (
+            <div key={i} className={`bg-neutral-700 overflow-hidden ${thumbs.length === 1 ? 'col-span-2 row-span-2' : thumbs.length === 2 ? 'row-span-2' : ''}`}>
+              {v.thumbnail ? (
+                <img src={v.thumbnail} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <Play size={16} className="text-neutral-600" />
+                </div>
+              )}
+            </div>
+          )) : (
+            <div className="col-span-2 row-span-2 flex items-center justify-center bg-neutral-800">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-neutral-700">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              </svg>
+            </div>
+          )}
+        </div>
+
+        {/* Folder name — double-click to rename (Fix #2) */}
+        {interactive && renamingFolderId === folder.id ? (
+          <input
+            autoFocus
+            type="text"
+            value={renameFolderValue}
+            onChange={(e) => setRenameFolderValue(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') commitRenameFolder();
+              if (e.key === 'Escape') cancelRenameFolder();
+            }}
+            onBlur={commitRenameFolder}
+            onClick={(e) => e.stopPropagation()}
+            className="font-semibold text-white bg-neutral-700 px-2 py-0.5 rounded-lg outline-none focus:ring-2 focus:ring-red-500 w-full truncate"
+          />
+        ) : (
+          <h3
+            className="font-semibold text-white truncate group-hover:text-red-400 transition-colors cursor-pointer"
+            onDoubleClick={interactive ? (e) => {
+              e.stopPropagation();
+              startRenameFolder(folder.id, folder.name);
+            } : undefined}
+            title="Double-click to rename"
+          >{folder.name}</h3>
+        )}
+        <p className="text-xs text-neutral-500 mt-1">{fvids.length} video{fvids.length !== 1 ? 's' : ''}</p>
+      </>
+    );
+  };
+  const draggingFolder = draggingFolderId ? folders.find(f => f.id === draggingFolderId) ?? null : null;
 
   // Grid card (no drag in grid)
   const renderVideoCard = (video: VideoMeta) => (
@@ -1155,88 +1290,50 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {folders.map(folder => {
-                const fvids = folder.videoIds.map(id => videos.find(v => v.id === id)).filter(Boolean) as VideoMeta[];
-                const thumbs = fvids.slice(0, 4);
-
-                return (
-                  <button
-                    key={folder.id}
-                    onClick={() => setOpenFolder(folder)}
-                    className="group relative bg-neutral-800/60 hover:bg-neutral-800 rounded-xl p-4 transition-all duration-300 hover:shadow-lg hover:shadow-red-600/10 text-left active:scale-[0.98]"
-                  >
-                    {/* Thumbnail mosaic */}
-                    <div className="grid grid-cols-2 gap-1 rounded-lg overflow-hidden mb-3 aspect-video bg-neutral-900">
-                      {thumbs.length > 0 ? thumbs.map((v, i) => (
-                        <div key={i} className={`bg-neutral-700 overflow-hidden ${thumbs.length === 1 ? 'col-span-2 row-span-2' : thumbs.length === 2 ? 'row-span-2' : ''}`}>
-                          {v.thumbnail ? (
-                            <img src={v.thumbnail} alt="" className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Play size={16} className="text-neutral-600" />
-                            </div>
-                          )}
-                        </div>
-                      )) : (
-                        <div className="col-span-2 row-span-2 flex items-center justify-center bg-neutral-800">
-                          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-neutral-700">
-                            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Folder name — double-click to rename (Fix #2) */}
-                    {renamingFolderId === folder.id ? (
-                      <input
-                        autoFocus
-                        type="text"
-                        value={renameFolderValue}
-                        onChange={(e) => setRenameFolderValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === 'Enter') commitRenameFolder();
-                          if (e.key === 'Escape') cancelRenameFolder();
-                        }}
-                        onBlur={commitRenameFolder}
-                        onClick={(e) => e.stopPropagation()}
-                        className="font-semibold text-white bg-neutral-700 px-2 py-0.5 rounded-lg outline-none focus:ring-2 focus:ring-red-500 w-full truncate"
-                      />
-                    ) : (
-                      <h3
-                        className="font-semibold text-white truncate group-hover:text-red-400 transition-colors cursor-pointer"
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          startRenameFolder(folder.id, folder.name);
-                        }}
-                        title="Double-click to rename"
-                      >{folder.name}</h3>
-                    )}
-                    <p className="text-xs text-neutral-500 mt-1">{fvids.length} video{fvids.length !== 1 ? 's' : ''}</p>
-
-                    {/* Share folder */}
-                    {onShareFolder && folder.videoIds.length > 0 && (
+            <DndContext
+              sensors={folderSensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleFolderDragStart}
+              onDragEnd={handleFolderDragEnd}
+              onDragCancel={() => setDraggingFolderId(null)}
+            >
+              <SortableContext items={folders.map(f => f.id)} strategy={rectSortingStrategy}>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {folders.map(folder => (
+                    <SortableFolderCard key={folder.id} id={folder.id} disabled={renamingFolderId === folder.id}>
                       <button
-                        onClick={(e) => { e.stopPropagation(); onShareFolder!(folder.videoIds, folder.name); }}
-                        className="absolute top-2 right-10 p-1.5 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all"
-                        title="Share folder"
+                        onClick={() => setOpenFolder(folder)}
+                        className="group relative w-full bg-neutral-800/60 hover:bg-neutral-800 rounded-xl p-4 transition-all duration-300 hover:shadow-lg hover:shadow-red-600/10 text-left active:scale-[0.98]"
                       >
-                        <Share2 size={14} />
-                      </button>
-                    )}
+                        {renderFolderFace(folder, true)}
 
-                    {/* Delete */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }}
-                      className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </button>
-                );
-              })}
-            </div>
+                        {/* Share folder */}
+                        {onShareFolder && folder.videoIds.length > 0 && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onShareFolder!(folder.videoIds, folder.name); }}
+                            className="absolute top-2 right-10 p-1.5 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all"
+                            title="Share folder"
+                          >
+                            <Share2 size={14} />
+                          </button>
+                        )}
+
+                        {/* Delete */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteFolder(folder.id); }}
+                          className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-400 hover:bg-red-600/20 transition-all"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </button>
+                    </SortableFolderCard>
+                  ))}
+                </div>
+              </SortableContext>
+              <DragOverlay dropAnimation={FOLDER_DROP}>
+                {draggingFolder ? <GlassFolder>{renderFolderFace(draggingFolder, false)}</GlassFolder> : null}
+              </DragOverlay>
+            </DndContext>
           )}
         </div>
       )}
