@@ -91,12 +91,28 @@ function resolutionOf(w?: number, h?: number): string | undefined {
   return 'SD';
 }
 
-/** "yuv420p10" → 10; plain "yuv420p" → 8. */
-function bitDepthOf(pixfmt?: string): number | undefined {
+/** Hardware surfaces name where a frame lives, not its depth ("d3d11" is not 11-bit). */
+const HW_SURFACE = /^(d3d11|dxva2|cuda|vaapi|vdpau|vulkan|videotoolbox|drm_prime|mediacodec|qsv|opencl|mmal)/;
+
+/**
+ * Bits per sample of a pixel format: "yuv420p10le" → 10, "p010" → 10,
+ * "y210" → 10, "nv12" / "yuv420p" → 8. Undefined for a hardware surface
+ * (pass `hw-pixelformat`, what's inside it) or a format it doesn't know.
+ */
+export function bitDepthOf(pixfmt?: string): number | undefined {
   if (!pixfmt) return undefined;
-  const m = pixfmt.match(/p(\d{2})(le|be)?$/) ?? pixfmt.match(/(\d{2})(le|be)?$/);
-  if (m) return parseInt(m[1], 10);
-  return /^(yuv|nv12|rgb|bgr|gray)/.test(pixfmt) ? 8 : undefined;
+  const f = pixfmt.toLowerCase();
+  if (HW_SURFACE.test(f)) return undefined;
+  // Semi-planar / packed high-depth formats: p010, p012, p016, p210, p410, y210, y212…
+  const packed = f.match(/^[py][0-9](1[0-6]|0[89])(le|be)?$/);
+  if (packed) return parseInt(packed[1], 10);
+  // Planar: yuv420p10le, gbrp12, yuva444p16be…; grey: gray10le.
+  const planar = f.match(/p(\d{1,2})(le|be)?$/);
+  if (planar && /^(yuv|yuva|gbr|gbra)/.test(f)) return parseInt(planar[1], 10);
+  const grey = f.match(/^(?:gray|ya)(\d{1,2})(le|be)?$/);
+  if (grey) return parseInt(grey[1], 10);
+  if (/^(nv12|nv21|nv16|nv24|yuyv|uyvy|yuv|yuvj|rgb|bgr|argb|abgr|rgba|bgra|0rgb|rgb0|bgr0|0bgr|gray|gbrp$)/.test(f)) return 8;
+  return undefined;
 }
 
 function rangeOf(raw: RawMedia): MediaInfo['range'] {
@@ -194,7 +210,7 @@ export function describeMedia(raw: RawMedia, display?: DisplayHdr | null): Media
     resolution: resolutionOf(width, height),
     width, height,
     range,
-    bitDepth: bitDepthOf(v.pixelformat),
+    bitDepth: bitDepthOf(v['hw-pixelformat'] ?? v.pixelformat),
     videoCodec: codecId ? (VIDEO_CODECS[codecId] ?? codecId.toUpperCase()) : undefined,
     hardwareDecoding: raw.hwdec ? raw.hwdec !== 'no' : undefined,
     output,

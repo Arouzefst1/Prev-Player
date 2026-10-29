@@ -130,6 +130,7 @@ pub fn run() {
             disc::disc_probe,
             frames::frames_probe,
             frames::frames_grab,
+            frames::frames_storyboard,
             frames::frames_release,
             updater::update_check,
             updater::update_pending,

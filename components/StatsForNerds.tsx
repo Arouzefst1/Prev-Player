@@ -17,7 +17,7 @@ const PROPS = [
   'mistimed-frame-count', 'video-bitrate', 'audio-bitrate', 'audio-codec-name', 'audio-params/samplerate',
   'audio-params/channel-count', 'audio-out-params/format', 'audio-out-params/samplerate',
   'audio-out-params/channel-count', 'current-ao', 'avsync', 'demuxer-cache-duration', 'cache-speed',
-  'file-format', 'file-size', 'path', 'video-params/pixelformat', 'video-params/gamma',
+  'file-format', 'file-size', 'path', 'video-params/pixelformat', 'video-params/hw-pixelformat', 'video-params/gamma',
   'video-params/primaries', 'video-params/colormatrix', 'video-params/levels', 'video-params/max-cll',
   'video-params/max-fall', 'video-params/max-luma', 'video-target-params/gamma', 'video-target-params/max-luma',
 ] as const;
@@ -113,7 +113,7 @@ const StatsForNerds: React.FC<Props> = ({ onClose, shortcut }) => {
       </Row>
       <Row label="Picture">
         {[info.range?.label ?? (gamma ? gamma.toUpperCase() : null), gamma, p['video-params/primaries'], p['video-params/colormatrix'],
-          info.bitDepth ? `${info.bitDepth}-bit` : null, p['video-params/pixelformat'], p['video-params/levels']].filter(Boolean).join(' · ') || '—'}
+          info.bitDepth ? `${info.bitDepth}-bit` : null, p['video-params/hw-pixelformat'] ?? p['video-params/pixelformat'], p['video-params/levels']].filter(Boolean).join(' · ') || '—'}
       </Row>
       {dv !== undefined && (
         <Row label="Dolby Vision">
