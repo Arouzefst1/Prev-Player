@@ -9,8 +9,13 @@ import DownloadsPanel from './components/DownloadsPanel';
 import SettingsModal from './components/SettingsModal';
 import PropertiesModal, { type PropertiesTarget } from './components/PropertiesModal';
 import { useSettings } from './settings';
-import { mpvStop, getMpvState, shutdownMpv } from './mpv';
+import { mpvStop, getMpvState, shutdownMpv, mpvSetPassthrough } from './mpv';
 import * as engine from './engine';
+import { VIDEO_EXT_LIST, AUDIO_EXT_LIST, MEDIA_EXT_LIST, isMediaPath, isAudioPath } from './formats';
+import { actionFor } from './shortcuts';
+import { probeDisc, isIsoPath } from './disc';
+import * as frames from './frames';
+import type { RawMedia } from './media';
 import {
   srtToVtt,
   extractVideoThumbnail,
@@ -28,22 +33,8 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const VIDEO_EXT_LIST = ['mp4','webm','mkv','avi','mov','wmv','flv','ogv','ogg','m4v','3gp','3g2','ts','mts','m2ts','vob','mpg','mpeg'];
-const AUDIO_EXT_LIST = ['mp3','m4a','aac','wav','flac','opus','oga','weba','wma','mka','aiff','aif'];
-const MEDIA_EXT_LIST = [...VIDEO_EXT_LIST, ...AUDIO_EXT_LIST];
-
-// Accepts both video and audio (the <video> element plays audio files too).
-const MEDIA_EXTENSIONS = new Set(MEDIA_EXT_LIST.map(e => '.' + e));
-
-function isVideoPath(p: string): boolean {
-  const ext = '.' + p.split('.').pop()?.toLowerCase();
-  return MEDIA_EXTENSIONS.has(ext);
-}
-
-function isAudioPath(p: string): boolean {
-  const ext = p.split('.').pop()?.toLowerCase() ?? '';
-  return AUDIO_EXT_LIST.includes(ext);
-}
+// Accepts both video and audio — the full list lives in formats.ts.
+const isVideoPath = isMediaPath;
 
 function typeFromPath(p: string): string {
   const ext = p.split('.').pop()?.toLowerCase() ?? '';
@@ -148,6 +139,9 @@ function App() {
   // Ref mirror so callbacks read the latest settings without being in their deps.
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  // Dolby / DTS to the receiver: applied live, and as mpv's starting value if it
+  // hasn't started yet (mpvSetPassthrough never starts it just for this).
+  useEffect(() => { mpvSetPassthrough(settings.audioPassthrough).catch(() => {}); }, [settings.audioPassthrough]);
 
   // Ref mirror of the library so add-handlers can reorder from the freshest list
   // without depending on (and re-creating themselves for) every library change.
@@ -490,6 +484,11 @@ function App() {
         })();
       }
 
+      // Entries added before the frame engine (or whose probe never ran) get a
+      // real thumbnail, length and format now — quietly, one at a time.
+      const unprobed = metas.filter(m => !m.probed && !/^https?:/i.test(m.path));
+      if (unprobed.length > 0) enqueueMetaExtraction(unprobed.map(m => ({ path: m.path, id: m.id })), true);
+
       // Restore last-played video reference
       const lastRaw = localStorage.getItem(STORAGE_LAST_VIDEO);
       if (lastRaw) {
@@ -525,7 +524,8 @@ function App() {
           } else if (p.type === 'drop') {
             setIsDragging(false);
             const dropped: string[] = p.paths ?? [];
-            const videos = dropped.filter(isVideoPath);
+            // With discs on, folders and ISOs go through too: a Blu-ray / DVD among them plays.
+            const videos = dropped.filter(p => isVideoPath(p) || settingsRef.current.discPlayback);
             if (videos.length) handleFilePaths(videos);
           } else {
             // 'leave' / cancelled
@@ -568,23 +568,38 @@ function App() {
   }, [playlist, currentIndex, videoLibrary]);
 
   // ---------------------------------------------------------------------------
-  // Background metadata extraction (thumbnail + duration)
+  // Background metadata extraction (thumbnail + duration + format)
   // Runs sequentially off the critical path; thumbnails fill in after playback starts.
+  //
+  // The headless mpv (frames.ts) does it: it opens MKV, HEVC, AV1, DTS, TrueHD —
+  // everything the player plays — and tone-maps HDR thumbnails. The WebView's
+  // <video> is only a fallback for a build without mpv, since it can't open most
+  // of those. Each file is probed once (`probed`), even when that fails.
   // ---------------------------------------------------------------------------
   const metaQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const metaPendingRef = useRef(0);
 
-  const enqueueMetaExtraction = useCallback((items: { path: string; id: string }[]) => {
+  const enqueueMetaExtraction = useCallback((items: { path: string; id: string }[], gentle = false) => {
     if (items.length === 0) return;
+    metaPendingRef.current += items.length;
     metaQueueRef.current = metaQueueRef.current.then(async () => {
       const { convertFileSrc } = await import('@tauri-apps/api/core');
       const { stat } = await import('@tauri-apps/plugin-fs');
       for (const { path, id } of items) {
-        const fileUrl = convertFileSrc(path);
         let thumbnail: string | undefined;
         let duration: number | undefined;
         let size: number | undefined;
-        try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {}
-        try { duration = await getVideoDuration(fileUrl); } catch {}
+        let media: RawMedia | undefined;
+        try {
+          const p = await frames.probe(path);
+          thumbnail = p.thumbnail;
+          duration = p.duration;
+          media = frames.mediaOfProbe(p);
+        } catch {
+          const fileUrl = convertFileSrc(path);
+          try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {}
+          try { duration = await getVideoDuration(fileUrl); } catch {}
+        }
         // Real file size straight from the file-system metadata — reads the size
         // only, never the bytes, so it does NOT copy the file / use extra storage.
         try { size = (await stat(path)).size; } catch {}
@@ -592,13 +607,35 @@ function App() {
           ...(thumbnail ? { thumbnail } : {}),
           ...(duration !== undefined ? { duration } : {}),
           ...(size !== undefined ? { size } : {}),
+          ...(media ? { media } : {}),
+          probed: true,
         };
-        if (Object.keys(patch).length > 0) {
-          try { await videoStore.updateMeta(id, patch); } catch {}
-          setVideoLibrary(prev => prev.map(v => (v.id === id ? { ...v, ...patch } : v)));
-        }
+        try { await videoStore.updateMeta(id, patch); } catch {}
+        setVideoLibrary(prev => prev.map(v => (v.id === id ? { ...v, ...patch } : v)));
+        metaPendingRef.current -= 1;
+        // A backfill of an existing library breathes between files, so it never
+        // competes with a video that's playing.
+        if (gentle) await new Promise(r => setTimeout(r, 400));
       }
+      // Nothing left to look at: let the headless mpv go.
+      if (metaPendingRef.current <= 0) frames.releaseFrames('library');
     });
+  }, []);
+
+  /**
+   * What a list of dropped / picked paths holds that can play: media files as
+   * they are, plus — with discs on — Blu-ray / DVD ISOs and folders, named
+   * after the disc and filed under the folder that holds BDMV / VIDEO_TS.
+   */
+  const intake = useCallback(async (paths: string[]): Promise<{ path: string; name?: string; disc?: 'bluray' | 'dvd' }[]> => {
+    const out: { path: string; name?: string; disc?: 'bluray' | 'dvd' }[] = [];
+    for (const p of paths) {
+      if (isVideoPath(p)) { out.push({ path: p }); continue; }
+      if (!settingsRef.current.discPlayback) continue;
+      const d = await probeDisc(p);
+      if (d && !out.some(o => o.path === d.root)) out.push({ path: d.root, name: d.label, disc: d.kind });
+    }
+    return out;
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -610,8 +647,13 @@ function App() {
     const link = paths.find(p => typeof p === 'string' && p.trim().toLowerCase().startsWith('prevplayer://'));
     if (link) { setShareTarget(null); setFolderTarget(null); setShareInitialLink(link.trim()); setShareOpen(true); return; }
 
-    const videoPaths = paths.filter(isVideoPath);
-    if (videoPaths.length === 0) { setError('No playable video files found.'); return; }
+    const entries = await intake(paths);
+    if (entries.length === 0) {
+      setError(!settingsRef.current.discPlayback && paths.some(isIsoPath)
+        ? 'Blu-ray and DVD images play once “Blu-ray & DVD” is on in Settings › Playback.'
+        : 'No playable video files found.');
+      return;
+    }
     setError(null);
 
     const { convertFileSrc } = await import('@tauri-apps/api/core');
@@ -624,7 +666,7 @@ function App() {
     const playlistItems: PlaylistItem[] = [];
     const newMetas: VideoMeta[] = [];
 
-    for (const p of videoPaths) {
+    for (const { path: p, name: label, disc } of entries) {
       const existing = byPath.get(p);
       if (existing) {
         playlistItems.push({ id: existing.id, src: convertFileSrc(p), path: p, name: existing.name, thumbnail: existing.thumbnail });
@@ -633,8 +675,9 @@ function App() {
       // Dedupe within this batch
       let id = seenInBatch.get(p);
       if (!id) { id = genId(); seenInBatch.set(p, id); }
-      const name = p.replace(/\\/g, '/').split('/').pop() ?? p;
-      const meta: VideoMeta = { id, name, path: p, size: 0, addedAt: Date.now(), type: typeFromPath(p) };
+      const name = label ?? p.replace(/\\/g, '/').split('/').pop() ?? p;
+      // A disc has nothing for the frame engine to read, so it counts as probed.
+      const meta: VideoMeta = { id, name, path: p, size: 0, addedAt: Date.now(), type: disc ? 'video' : typeFromPath(p), ...(disc ? { disc, probed: true } : {}) };
       newMetas.push(meta);
       playlistItems.push({ id, src: convertFileSrc(p), path: p, name });
     }
@@ -660,35 +703,36 @@ function App() {
       // Persist metadata (path only — no blob) to IndexedDB
       for (const meta of newMetas) {
         try {
-          await videoStore.save({ id: meta.id, name: meta.name, path: meta.path, size: 0, addedAt: meta.addedAt, type: meta.type });
+          await videoStore.save({ id: meta.id, name: meta.name, path: meta.path, size: 0, addedAt: meta.addedAt, type: meta.type, disc: meta.disc, probed: meta.probed });
         } catch {}
       }
       // Background: extract thumbnail + duration
-      enqueueMetaExtraction(newMetas.map(m => ({ path: m.path, id: m.id })));
+      enqueueMetaExtraction(newMetas.filter(m => !m.disc).map(m => ({ path: m.path, id: m.id })));
     }
 
     // Show new videos AND bubble every selected file (new or already-owned) to the
     // top of the library, so opening from Explorer always lands it at #1.
     const touchedIds = Array.from(new Set(playlistItems.map(pi => pi.id)));
     promoteToTop(newMetas, touchedIds);
-  }, [enqueueMetaExtraction, showToast, promoteToTop]);
+  }, [enqueueMetaExtraction, showToast, promoteToTop, intake]);
 
   // Add paths to library only (no auto-play), used from the library panel
   const handleAddToLibraryOnly = useCallback(async (paths: string[]): Promise<string[]> => {
-    const videoPaths = paths.filter(isVideoPath);
-    if (videoPaths.length === 0) return [];
+    const entries = await intake(paths);
+    if (entries.length === 0) return [];
 
     const allMetas = await videoStore.getAllMeta();
     const byPath = new Map(allMetas.map(m => [m.path, m]));
     const newMetas: VideoMeta[] = [];
     const touchedIds: string[] = []; // existing + new, in selection order
 
-    for (const p of videoPaths) {
+    for (const { path: p, name: label, disc } of entries) {
       const existing = byPath.get(p);
       if (existing) { touchedIds.push(existing.id); continue; }
       const id = genId();
-      const name = p.replace(/\\/g, '/').split('/').pop() ?? p;
-      newMetas.push({ id, name, path: p, size: 0, addedAt: Date.now(), type: typeFromPath(p) });
+      const name = label ?? p.replace(/\\/g, '/').split('/').pop() ?? p;
+      newMetas.push({ id, name, path: p, size: 0, addedAt: Date.now(), type: disc ? 'video' : typeFromPath(p), ...(disc ? { disc, probed: true } : {}) });
+      byPath.set(p, newMetas[newMetas.length - 1]);
       touchedIds.push(id);
     }
 
@@ -696,19 +740,27 @@ function App() {
       for (const m of newMetas) {
         try { await videoStore.save({ ...m }); } catch {}
       }
-      enqueueMetaExtraction(newMetas.map(m => ({ path: m.path, id: m.id })));
+      enqueueMetaExtraction(newMetas.filter(m => !m.disc).map(m => ({ path: m.path, id: m.id })));
     }
 
     // New videos appear — and re-selected ones bubble up — at the top of the library.
     promoteToTop(newMetas, Array.from(new Set(touchedIds)));
     return touchedIds;
-  }, [enqueueMetaExtraction, promoteToTop]);
+  }, [enqueueMetaExtraction, promoteToTop, intake]);
 
   // Import a whole folder: use Tauri's native folder dialog + FS to list video files
   const handleAddFolderFromPC = useCallback(async () => {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const folderPath = await open({ directory: true, multiple: false, title: 'Select Folder to Import' });
     if (!folderPath || typeof folderPath !== 'string') return;
+
+    // A Blu-ray / DVD folder is one film, not a folder of clips.
+    if (settingsRef.current.discPlayback && await probeDisc(folderPath)) {
+      setError(null);
+      await handleAddToLibraryOnly([folderPath]);
+      setVideoLibrary(prev => [...prev]);
+      return;
+    }
 
     let entries: any[] = [];
     try {
@@ -750,9 +802,10 @@ function App() {
     const result = await open({
       multiple: true,
       filters: [
-        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Media Files', extensions: settingsRef.current.discPlayback ? [...MEDIA_EXT_LIST, 'iso'] : MEDIA_EXT_LIST },
         { name: 'Video Files', extensions: VIDEO_EXT_LIST },
         { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+        ...(settingsRef.current.discPlayback ? [{ name: 'Blu-ray / DVD images', extensions: ['iso'] }] : []),
       ],
       title: 'Add Media Files',
     });
@@ -776,9 +829,10 @@ function App() {
     const result = await open({
       multiple: true,
       filters: [
-        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Media Files', extensions: settingsRef.current.discPlayback ? [...MEDIA_EXT_LIST, 'iso'] : MEDIA_EXT_LIST },
         { name: 'Video Files', extensions: VIDEO_EXT_LIST },
         { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+        ...(settingsRef.current.discPlayback ? [{ name: 'Blu-ray / DVD images', extensions: ['iso'] }] : []),
       ],
       title: 'Open Media Files',
     });
@@ -800,24 +854,20 @@ function App() {
     const result = await open({
       multiple: true,
       filters: [
-        { name: 'Media Files', extensions: MEDIA_EXT_LIST },
+        { name: 'Media Files', extensions: settingsRef.current.discPlayback ? [...MEDIA_EXT_LIST, 'iso'] : MEDIA_EXT_LIST },
         { name: 'Video Files', extensions: VIDEO_EXT_LIST },
         { name: 'Audio Files', extensions: AUDIO_EXT_LIST },
+        ...(settingsRef.current.discPlayback ? [{ name: 'Blu-ray / DVD images', extensions: ['iso'] }] : []),
       ],
       title: 'Add Media to Folder',
     });
     if (!result) return;
     const paths = Array.isArray(result) ? result : [result];
-    await handleAddToLibraryOnly(paths as string[]);
+    const ids = await handleAddToLibraryOnly(paths as string[]);
 
     // Link the newly-added videos to the folder
-    const allMetas = await videoStore.getAllMeta();
-    const byPath = new Map(allMetas.map(m => [m.path, m]));
     const { folderStore } = await import('./utils');
-    (paths as string[]).filter(isVideoPath).forEach(p => {
-      const meta = byPath.get(p);
-      if (meta) folderStore.addVideo(folderId, meta.id);
-    });
+    ids.forEach(id => folderStore.addVideo(folderId, id));
 
     setVideoLibrary(prev => [...prev]);
   }, [handleAddToLibraryOnly]);
@@ -1528,7 +1578,7 @@ function App() {
       if (isTypingTarget(e.target)) return;
       if (e.key === 'Escape') {
         setWindowFullscreen(false);
-      } else if (e.key === 'f' || e.key === 'F') {
+      } else if (actionFor(e) === 'fullscreen') {
         e.preventDefault();
         setWindowFullscreen('toggle');
       }

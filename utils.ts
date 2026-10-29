@@ -1,3 +1,5 @@
+import type { RawMedia } from './media';
+
 export const formatTime = (seconds: number): string => {
   if (isNaN(seconds)) return "00:00";
 
@@ -193,6 +195,12 @@ export interface StoredVideo {
   addedAt: number;
   duration?: number;
   type: string;
+  /** Picture/sound format from the frame engine's probe (see media.ts). */
+  media?: RawMedia;
+  /** Set once a probe has run, found or not, so a file is probed only once. */
+  probed?: boolean;
+  /** A Blu-ray or DVD (an ISO, or the folder holding BDMV / VIDEO_TS). */
+  disc?: 'bluray' | 'dvd';
 }
 
 /** Metadata exposed to the UI */
@@ -205,6 +213,9 @@ export interface VideoMeta {
   addedAt: number;
   duration?: number;
   type: string;
+  media?: RawMedia;
+  probed?: boolean;
+  disc?: 'bluray' | 'dvd';
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -268,7 +279,7 @@ export const videoStore = {
     });
   },
 
-  async updateMeta(id: string, patch: { thumbnail?: string; duration?: number; size?: number }): Promise<void> {
+  async updateMeta(id: string, patch: { thumbnail?: string; duration?: number; size?: number; media?: RawMedia; probed?: boolean }): Promise<void> {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -280,6 +291,8 @@ export const videoStore = {
           if (patch.thumbnail !== undefined) record.thumbnail = patch.thumbnail;
           if (patch.duration !== undefined) record.duration = patch.duration;
           if (patch.size !== undefined) record.size = patch.size;
+          if (patch.media !== undefined) record.media = patch.media;
+          if (patch.probed !== undefined) record.probed = patch.probed;
           store.put(record);
         }
       };

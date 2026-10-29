@@ -1,6 +1,6 @@
 [package]
 name = "prev-player"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2021"
 license = "MIT"
 
@@ -25,6 +25,8 @@ tauri-plugin-mpv = "0.5.2"
 # bytes between devices lives behind this one façade — see ../engine.
 prev-engine = { path = "../engine/crates/prev-engine" }
 prev-core = { path = "../engine/crates/prev-core" }
+# Thumbnails / probes from a headless mpv (library cards, seek-bar previews).
+prev-frames = { path = "../engine/crates/prev-frames" }
 
 # GitHub Release assets as a share backend + the REST passthrough that avoids
 # WebView CORS. Uploads stay here; downloads go through the engine.
@@ -36,8 +38,11 @@ tauri-plugin-deep-link = "2"
 # Auto-updater: checks the signed `latest.json` manifest, downloads + installs
 # the new build, then `tauri-plugin-process` is used to relaunch the app.
 # Windows Firewall: the elevated script is passed base64-encoded (see firewall.rs).
+# The display API: whether each screen is in HDR, and switching HDR / refresh
+# rate to match a video (see display.rs).
 [target."cfg(windows)".dependencies]
 base64 = "0.22"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Devices_Display", "Win32_Graphics_Gdi"] }
 
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"

@@ -8,6 +8,7 @@
 // ==========================================================================
 
 import { useState, useEffect, useCallback } from 'react';
+import type { ShortcutAction } from './shortcuts';
 
 export interface AppSettings {
   /** Start playing videos immediately when they're added to the library. */
@@ -39,6 +40,40 @@ export interface AppSettings {
   autoCheckUpdates: boolean;
   /** Folder received/downloaded videos are saved to (null → Downloads/PREV Player). */
   downloadPath: string | null;
+  /**
+   * Send Dolby and DTS audio to an AV receiver / soundbar undecoded, so it can
+   * render Atmos and DTS:X. Off by default: speakers or headphones plugged into
+   * the PC would get silence.
+   */
+  audioPassthrough: boolean;
+  /**
+   * Turn Windows HDR on while an HDR video plays (and back off after), so it
+   * isn't tone-mapped down on a screen that could show it.
+   */
+  autoHdr: boolean;
+  /** Switch the screen's refresh rate to match the video (24p on a 24 Hz mode). */
+  matchRefreshRate: boolean;
+  /** How see-through the Stats for nerds panel is: 0.15 (glass) … 1 (solid). */
+  statsOpacity: number;
+  /** Keys the user changed; anything missing uses the default (shortcuts.ts). */
+  shortcuts: Partial<Record<ShortcutAction, string>>;
+  /**
+   * Pick the audio track in the preferred language, best quality first
+   * (lossless and Atmos over lossy, surround over stereo), skipping commentary.
+   */
+  smartAudio: boolean;
+  /** Language for smart audio and subtitles ("" = the app's language). */
+  preferredLanguage: string;
+  /** Remember the audio and subtitle tracks picked for a video, and use them for the rest of its folder. */
+  rememberTracks: boolean;
+  /** Show forced subtitles (signs, foreign dialogue) even with subtitles off. */
+  forcedSubtitles: boolean;
+  /** A second subtitle line, in this language, above the first ("" = off). */
+  secondSubtitleLanguage: string;
+  /** Skipping back with subtitles off shows them for the part you replay. */
+  subtitlesOnSkipBack: boolean;
+  /** Open Blu-ray and DVD ISOs and BDMV / VIDEO_TS folders as discs. */
+  discPlayback: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -54,6 +89,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   speedStep: 0.5,
   autoCheckUpdates: true,
   downloadPath: null,
+  audioPassthrough: false,
+  autoHdr: false,
+  matchRefreshRate: false,
+  statsOpacity: 0.6,
+  shortcuts: {},
+  smartAudio: false,
+  preferredLanguage: '',
+  rememberTracks: false,
+  forcedSubtitles: false,
+  secondSubtitleLanguage: '',
+  subtitlesOnSkipBack: false,
+  discPlayback: false,
 };
 
 const STORAGE_SETTINGS = 'prevplayer_settings';
