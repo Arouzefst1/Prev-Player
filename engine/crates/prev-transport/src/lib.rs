@@ -23,8 +23,66 @@ pub use manifest::{fetch_manifest, FolderManifest, ManifestItem};
 pub use retry::{read_range_retrying, RetryPolicy};
 
 use async_trait::async_trait;
-use prev_core::{EngineError, Result, ShareLink};
+use prev_core::{url_host, EngineError, Result, ShareLink};
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// The HTTP client every transfer, manifest and digest request is made with.
+///
+/// A sender on this network is dialled directly, never through a proxy: a
+/// system or environment proxy (office settings, a VPN app's local proxy) has
+/// no route to another device on the Wi-Fi, so going through one is how a
+/// receiver on the same network still couldn't connect.
+///
+/// TCP keepalive is what notices a sender that vanished mid-transfer — the
+/// laptop slept, or left the Wi-Fi — and turns a read that would otherwise wait
+/// forever into an error the chunk retries. A sender that is merely busy still
+/// answers the probes, so a request queued behind others never trips it, which
+/// is why this isn't a read timeout.
+///
+/// A LAN sender also gets one connection per request, closed after the
+/// response. The share server (tiny_http 0.12) gives every connection a pooled
+/// thread for as long as it stays open, and its pool can drop the wake-up for a
+/// connection that arrives in the same instant as another. That connection then
+/// isn't read until some other one closes — and kept-alive idle connections
+/// stay open 90 s, so a chunk request sat unanswered for one to three minutes.
+/// With every connection closing after its response the pool keeps turning
+/// over, and a queued connection is picked up at once. On a LAN a fresh TCP
+/// handshake per multi-megabyte chunk costs nothing measurable.
+pub fn http_client(url: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("PREV-Player/engine")
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(15))
+        .tcp_keepalive_interval(Duration::from_secs(5))
+        .tcp_keepalive_retries(3);
+    if is_local_url(url) {
+        builder = builder.no_proxy().pool_max_idle_per_host(0);
+    }
+    builder.build().map_err(EngineError::transport)
+}
+
+/// Does this URL point at this machine or the local network — somewhere no
+/// proxy can reach on our behalf?
+pub fn is_local_url(url: &str) -> bool {
+    let Some(host) = url_host(url) else { return false };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_private() || ip.is_loopback() || ip.is_link_local()
+                || (a == 100 && (64..128).contains(&b)) // CGNAT / Tailscale
+        }
+        Ok(IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
 
 /// What a transport can tell us about a source before we transfer anything.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -79,6 +137,25 @@ pub fn resolve_url(scheme: &str, url: &str) -> Result<Arc<dyn Transport>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_and_loopback_addresses_skip_the_proxy_and_the_internet_does_not() {
+        for local in [
+            "http://192.168.1.23:4000/s/x",
+            "http://10.0.0.7:1/",
+            "http://172.20.1.1/",
+            "http://169.254.3.4/",
+            "http://100.101.2.3/",
+            "http://127.0.0.1:9/",
+            "http://localhost:3001/",
+            "http://[fe80::1]:80/",
+        ] {
+            assert!(is_local_url(local), "{local}");
+        }
+        for remote in ["https://github.com/a/b", "http://8.8.8.8/", "https://objects.githubusercontent.com/x"] {
+            assert!(!is_local_url(remote), "{remote}");
+        }
+    }
 
     #[test]
     fn resolves_known_schemes_and_rejects_unknown() {

@@ -65,6 +65,12 @@ pub struct ShareLink {
     pub hash_url: Option<String>,
     #[serde(rename = "f", skip_serializing_if = "Option::is_none", default)]
     pub files: Option<Vec<ShareFile>>,
+    /// Other addresses a LAN sender answers on, besides the one in `url`. A PC
+    /// on Wi-Fi and Ethernet at once, or with a VPN or virtual adapter, has
+    /// several and can't tell which network the receiver is on — so it lists
+    /// them all, and the receiver dials whichever answers. Older apps ignore it.
+    #[serde(rename = "a", skip_serializing_if = "Option::is_none", default)]
+    pub alt_hosts: Option<Vec<String>>,
 }
 
 impl ShareLink {
@@ -81,6 +87,7 @@ impl ShareLink {
             sha256: None,
             hash_url: None,
             files: None,
+            alt_hosts: None,
         }
     }
 
@@ -102,7 +109,34 @@ impl ShareLink {
             sha256: None,
             hash_url: None,
             files: Some(files),
+            alt_hosts: None,
         }
+    }
+
+    /// Every host this share can be dialled at: the one in `url`, then the
+    /// alternatives the sender listed.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut all: Vec<String> = url_host(&self.url).map(str::to_string).into_iter().collect();
+        for h in self.alt_hosts.iter().flatten() {
+            if !all.contains(h) {
+                all.push(h.clone());
+            }
+        }
+        all
+    }
+
+    /// The same share reached through `host`: every URL it carries — the
+    /// source, the digest, each folder entry — points there, port and path kept.
+    pub fn with_host(&self, host: &str) -> ShareLink {
+        let mut link = self.clone();
+        link.url = replace_host(&link.url, host);
+        link.hash_url = link.hash_url.map(|u| replace_host(&u, host));
+        for f in link.files.iter_mut().flatten() {
+            f.url = replace_host(&f.url, host);
+            f.hash_url = f.hash_url.take().map(|u| replace_host(&u, host));
+        }
+        link.alt_hosts = None;
+        link
     }
 
     /// The chunk grid the sender committed to. A resumed transfer must keep it.
@@ -157,9 +191,69 @@ impl ShareLink {
     }
 }
 
+/// The host of an `http(s)://host[:port]/…` URL, without port or brackets.
+pub fn url_host(url: &str) -> Option<&str> {
+    let authority = url.split_once("://")?.1.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map(|(_, a)| a).unwrap_or(authority);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split_once(']')?.0
+    } else {
+        authority.split(':').next()?
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// `url` with its host swapped for `host`; scheme, port and path untouched.
+fn replace_host(url: &str, host: &str) -> String {
+    let Some(old) = url_host(url) else { return url.to_string() };
+    let Some(at) = url.find(old) else { return url.to_string() };
+    format!("{}{}{}", &url[..at], host, &url[at + old.len()..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_moves_to_another_host_with_every_url_it_carries() {
+        let files = vec![ShareFile {
+            name: "a.mkv".into(),
+            size: 1,
+            url: "http://10.5.0.2:4123/f/x/0".into(),
+            sha256: None,
+            hash_url: Some("http://10.5.0.2:4123/h/x/0".into()),
+        }];
+        let mut link = ShareLink::folder("lan", "http://10.5.0.2:4123/f/x", "S1", files);
+        link.alt_hosts = Some(vec!["192.168.1.23".into(), "10.5.0.2".into()]);
+        assert_eq!(link.hosts(), ["10.5.0.2", "192.168.1.23"], "primary first, no repeats");
+
+        let moved = link.with_host("192.168.1.23");
+        assert_eq!(moved.url, "http://192.168.1.23:4123/f/x");
+        let f = &moved.files.as_ref().unwrap()[0];
+        assert_eq!(f.url, "http://192.168.1.23:4123/f/x/0");
+        assert_eq!(f.hash_url.as_deref(), Some("http://192.168.1.23:4123/h/x/0"));
+        assert_eq!(moved.alt_hosts, None, "a chosen address is final");
+    }
+
+    #[test]
+    fn old_links_without_alternatives_still_decode_and_new_ones_roundtrip() {
+        let mut link = ShareLink::file("lan", "http://192.168.1.5:7421/s/ab12", "Movie.mkv", 10);
+        // Exactly what an app from before alternatives encoded.
+        let old = link.encode();
+        assert_eq!(ShareLink::decode(&old).unwrap().alt_hosts, None);
+
+        link.alt_hosts = Some(vec!["10.0.0.7".into()]);
+        assert_eq!(ShareLink::decode(&link.encode()).unwrap(), link);
+    }
+
+    #[test]
+    fn url_host_handles_ports_paths_and_ipv6() {
+        assert_eq!(url_host("http://192.168.1.5:7421/s/ab"), Some("192.168.1.5"));
+        assert_eq!(url_host("https://github.com/a/b"), Some("github.com"));
+        assert_eq!(url_host("http://[fe80::1]:80/x"), Some("fe80::1"));
+        assert_eq!(url_host("http://h"), Some("h"));
+        assert_eq!(url_host("not a url"), None);
+    }
 
     #[test]
     fn file_link_roundtrips() {

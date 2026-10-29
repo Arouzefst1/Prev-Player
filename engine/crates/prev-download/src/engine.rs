@@ -437,7 +437,11 @@ async fn run_job(
     for w in workers {
         let _ = w.await;
     }
-    stop.notify_waiters();
+    // `notify_one`, not `notify_waiters`: the latter only reaches a reporter
+    // that is waiting at this very instant. One caught between ticks missed the
+    // signal, looped forever, and the transfer sat at 100% and never finished.
+    // `notify_one` keeps the signal until the reporter next asks for it.
+    stop.notify_one();
     let _ = reporter.await;
 
     let final_map = ctx.map.lock().unwrap().clone();
@@ -590,8 +594,10 @@ async fn reporter_loop(
 
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(progress_ms)) => {}
+            // Stop first: with both ready, an unbiased select could pick the tick.
+            biased;
             _ = stop.notified() => break,
+            _ = tokio::time::sleep(Duration::from_millis(progress_ms)) => {}
         }
 
         let snapshot = { ctx.map.lock().unwrap().clone() };
