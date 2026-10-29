@@ -10,6 +10,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore, applyVideoOrder } from '../utils';
+import { CardBadges } from './FormatBadges';
 
 // ============================================================
 // Props
@@ -234,7 +235,10 @@ const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
         {/* Info */}
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">{video.name}</h3>
-          <p className="text-xs text-neutral-500 mt-0.5">{formatFileSize(video.size)}</p>
+          <div className="flex items-center gap-2 mt-0.5">
+            {!(video.disc && !video.size) && <p className="text-xs text-neutral-500">{formatFileSize(video.size)}</p>}
+            <CardBadges media={video.media} disc={video.disc} />
+          </div>
         </div>
 
         {/* Play */}
@@ -658,6 +662,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
             {formatTime(video.duration)}
           </div>
         )}
+        <CardBadges media={video.media} disc={video.disc} className="absolute bottom-1 left-1" />
 
         {/* Actions — same set as the list view (queue / share / delete). */}
         {!editMode && (
@@ -694,7 +699,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
         <h3 className="text-xs sm:text-sm font-semibold text-white truncate group-hover:text-red-400 transition-colors">
           {video.name}
         </h3>
-        <p className="text-xs text-neutral-500 mt-1">{formatFileSize(video.size)}</p>
+        <p className="text-xs text-neutral-500 mt-1">{video.disc && !video.size ? (video.disc === 'bluray' ? 'Blu-ray disc' : 'DVD') : formatFileSize(video.size)}</p>
       </div>
     </div>
   );

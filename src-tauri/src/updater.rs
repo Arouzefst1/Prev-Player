@@ -173,6 +173,8 @@ pub async fn update_install(
         .ok_or("no update has been downloaded")?;
     // The run loop's exit handler won't get a turn: stop transfers cleanly here.
     crate::engine::shutdown(&app);
+    crate::frames::shutdown(&app);
+    crate::display::restore_all();
     let update = if relaunch { &pending.relaunch } else { &pending.stay_closed };
     update.install(&pending.bytes).map_err(|e| e.to_string())
 }

@@ -15,7 +15,7 @@ pub fn content_type(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
         // -- video containers ------------------------------------------------
         "mp4" | "m4v" | "mp4v" => "video/mp4",
-        "mkv" => "video/x-matroska",
+        "mkv" | "mk3d" => "video/x-matroska",
         "webm" => "video/webm",
         "mov" | "qt" => "video/quicktime",
         "avi" | "divx" => "video/x-msvideo",
@@ -23,7 +23,12 @@ pub fn content_type(name: &str) -> &'static str {
         "flv" | "f4v" => "video/x-flv",
         "ts" | "m2ts" | "mts" | "m2t" => "video/mp2t",
         "mpg" | "mpeg" | "m2v" | "mpe" | "m1v" => "video/mpeg",
-        "vob" => "video/dvd",
+        "vob" | "evo" => "video/dvd",
+        // Raw elementary streams (no container).
+        "hevc" | "h265" | "265" => "video/h265",
+        "h264" | "264" => "video/h264",
+        "ivf" | "obu" => "video/x-ivf",
+        "vvc" | "266" => "video/h266",
         "ogv" => "video/ogg",
         "3gp" => "video/3gpp",
         "3g2" => "video/3gpp2",
@@ -40,8 +45,17 @@ pub fn content_type(name: &str) -> &'static str {
         "opus" => "audio/opus",
         "wma" => "audio/x-ms-wma",
         "ac3" => "audio/ac3",
-        "eac3" => "audio/eac3",
+        "eac3" | "ec3" => "audio/eac3",
+        "thd" | "mlp" => "audio/vnd.dolby.mlp", // Dolby TrueHD
         "dts" | "dtshd" => "audio/vnd.dts",
+        "dsf" => "audio/x-dsf",
+        "dff" => "audio/x-dff",
+        "tak" => "audio/x-tak",
+        "tta" => "audio/x-tta",
+        "caf" => "audio/x-caf",
+        "w64" => "audio/x-w64",
+        "mpc" => "audio/x-musepack",
+        "mp2" => "audio/mpeg",
         "mka" => "audio/x-matroska",
         "aif" | "aiff" => "audio/aiff",
         "ape" => "audio/x-ape",
@@ -81,6 +95,17 @@ mod tests {
         assert_eq!(content_type("track.mka"), "audio/x-matroska");
         assert_eq!(content_type("track.dts"), "audio/vnd.dts");
         assert_eq!(content_type("subs.ass"), "text/x-ssa");
+    }
+
+    #[test]
+    fn covers_high_end_audio_and_raw_video_streams() {
+        assert_eq!(content_type("Film.thd"), "audio/vnd.dolby.mlp");
+        assert_eq!(content_type("Film.ec3"), "audio/eac3");
+        assert_eq!(content_type("Album.dsf"), "audio/x-dsf");
+        assert_eq!(content_type("Album.dff"), "audio/x-dff");
+        assert_eq!(content_type("clip.hevc"), "video/h265");
+        assert_eq!(content_type("3D.mk3d"), "video/x-matroska");
+        assert!(is_media("master.mxf") && is_media("disc.evo") && is_media("clip.ivf"));
     }
 
     #[test]

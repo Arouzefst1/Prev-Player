@@ -14,6 +14,7 @@ import {
   init, destroy, command, setProperty, getProperty, observeProperties,
   type MpvConfig,
 } from 'tauri-plugin-mpv-api';
+import { dynamicMetadataOf, type RawMedia } from './media';
 
 export interface MpvTrack {
   id: number;
@@ -24,6 +25,15 @@ export interface MpvTrack {
   codec?: string;
   /** Audio only — how many channels the stream carries (2 = stereo, 6 = 5.1). */
   channels?: number;
+  /** Marked forced: only signs and foreign-language lines (subtitles). */
+  forced?: boolean;
+  /** The file's own pick for this track type. */
+  default?: boolean;
+  /** Loaded from a separate file rather than the container. */
+  external?: boolean;
+  /** "DTS-HD MA", "Dolby TrueHD + Dolby Atmos"… where this mpv reports it. */
+  profile?: string;
+  hearingImpaired?: boolean;
 }
 
 export interface MpvState {
@@ -38,6 +48,8 @@ export interface MpvState {
   tracks: MpvTrack[];  // all embedded audio/subtitle/video tracks
   audioId: number | null; // current audio track id (aid)
   subId: number | null;   // current subtitle track id (sid), null = off
+  /** Second subtitle shown above the first (secondary-sid), null = none. */
+  secondarySubId?: number | null;
   videoAspect: number | null; // display aspect ratio (dwidth/dheight)
   /** The hardware decoder actually in use, or "no" when decoding in software. */
   hwdec?: string;
@@ -54,6 +66,10 @@ export interface MpvState {
   fps?: number;
   fileFormat?: string;
   fileSize?: number;
+  /** What mpv reports about the picture and sound — read through media.ts. */
+  media: RawMedia;
+  /** Chapters, in order (seek-bar preview titles and dividers). */
+  chapters: { title?: string; time: number }[];
 }
 
 // Properties we ask mpv to push to us on change. The diagnostic four (hwdec…
@@ -63,11 +79,24 @@ export interface MpvState {
 // hotplug at all.
 const OBSERVED = [
   'pause', 'time-pos', 'duration', 'volume', 'mute', 'speed', 'eof-reached', 'filename',
-  'track-list', 'aid', 'sid', 'dwidth', 'dheight',
+  'track-list', 'aid', 'sid', 'secondary-sid', 'dwidth', 'dheight',
   'hwdec-current', 'video-codec', 'demuxer-cache-duration', 'frame-drop-count',
   'container-fps', 'file-format', 'file-size',
   'current-ao', 'audio-device-list',
+  // Picture and sound, for media.ts. Individual fields rather than the whole
+  // `video-params` object: that also carries HDR10+ / Dolby Vision dynamic
+  // metadata, which changes every scene or frame and would flood this channel.
+  // (Fields an older mpv lacks are accepted and simply stay empty.)
+  'video-params/gamma', 'video-params/primaries', 'video-params/pixelformat',
+  'video-params/w', 'video-params/h',
+  'video-params/max-cll', 'video-params/max-fall', 'video-params/max-luma',
+  'video-target-params/gamma', 'audio-out-params/format',
+  'chapter-list',
 ] as const;
+
+/** Formats mpv may hand to the receiver undecoded when passthrough is on. */
+const SPDIF_CODECS = 'ac3,eac3,dts,dts-hd,truehd';
+let passthrough = false;
 
 let _dw = 0; let _dh = 0;
 
@@ -77,7 +106,7 @@ let unlisten: (() => void) | null = null;
 
 const state: MpvState = {
   paused: true, currentTime: 0, duration: 0, volume: 1, muted: false, speed: 1, ended: false,
-  tracks: [], audioId: null, subId: null, videoAspect: null,
+  tracks: [], audioId: null, subId: null, videoAspect: null, media: {}, chapters: [],
 };
 const subscribers = new Set<(s: MpvState) => void>();
 
@@ -174,6 +203,34 @@ function onAudioDevicesChanged(): void {
   if (audioDropped()) scheduleAudioRecovery();
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic HDR metadata.
+//
+// HDR10+ and Dolby Vision carry per-scene/per-frame metadata, which is why
+// `video-params` isn't observed as a whole. Whether a file HAS it is a one-off
+// question, so it's asked once, shortly after the picture's format is known.
+// ---------------------------------------------------------------------------
+
+let dynamicProbe: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleDynamicProbe(): void {
+  if (dynamicProbe) clearTimeout(dynamicProbe);
+  dynamicProbe = setTimeout(async () => {
+    dynamicProbe = null;
+    try {
+      const params = await getProperty<Record<string, any>>('video-params');
+      state.media = { ...state.media, dynamic: dynamicMetadataOf(params) };
+      emit();
+    } catch { /* no video, or the file changed — nothing to learn */ }
+  }, 1200);
+}
+
+function setMediaVideo(key: string, value: unknown): void {
+  const video = { ...state.media.video };
+  if (value === null || value === undefined) delete video[key]; else video[key] = value;
+  state.media = { ...state.media, video };
+}
+
 /**
  * Initialize the mpv engine. `mpvPath` points at a bundled mpv binary; omit it
  * in dev to use mpv from PATH. Safe to call multiple times (returns the same
@@ -192,7 +249,14 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
         '--keep-open=yes',             // pause on last frame instead of closing
         '--force-window=yes',          // always show the video surface
         '--idle=yes',                  // stay alive with no file loaded
-        '--target-colorspace-hint=yes',// HDR10/Dolby passthrough hint
+        // HDR: libplacebo renders HDR10, HDR10+ (dynamic metadata), HLG and Dolby
+        // Vision (profiles 5, 7 and 8, by applying the RPU), and this hint has it
+        // switch the screen into HDR when Windows HDR is on. On an SDR screen the
+        // same pipeline tone-maps instead, peak-detected per scene.
+        '--target-colorspace-hint=yes',
+        // Bitstream Dolby / DTS to an AV receiver when the user has turned it on.
+        // Changed live by mpvSetPassthrough(); this is just the starting value.
+        `--audio-spdif=${passthrough ? SPDIF_CODECS : ''}`,
         // Streaming: the engine answers an open-ended range with a bounded slice
         // so no single request can pin a serving thread to writing tens of GB.
         // ffmpeg treats a short body as a dead connection unless told to ask
@@ -245,6 +309,7 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
       return false;
     }
     initialized = true;
+    recordCapabilities();
 
     unlisten = await observeProperties(OBSERVED, ({ name, data }) => {
       switch (name) {
@@ -258,12 +323,16 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
         case 'filename':     state.filename = (data as string) ?? undefined; break;
         case 'aid':          state.audioId = typeof data === 'number' ? data : null; break;
         case 'sid':          state.subId = typeof data === 'number' ? data : null; break;
+        case 'secondary-sid': state.secondarySubId = typeof data === 'number' ? data : null; break;
         case 'dwidth':       _dw = typeof data === 'number' ? data : 0; state.width = _dw || undefined; state.videoAspect = _dw && _dh ? _dw / _dh : null; break;
         case 'dheight':      _dh = typeof data === 'number' ? data : 0; state.height = _dh || undefined; state.videoAspect = _dw && _dh ? _dw / _dh : null; break;
         case 'container-fps':          state.fps = typeof data === 'number' ? data : undefined; break;
         case 'file-format':            state.fileFormat = typeof data === 'string' ? data : undefined; break;
         case 'file-size':              state.fileSize = typeof data === 'number' ? data : undefined; break;
-        case 'hwdec-current':          state.hwdec = typeof data === 'string' ? data : undefined; break;
+        case 'hwdec-current':
+          state.hwdec = typeof data === 'string' ? data : undefined;
+          state.media = { ...state.media, hwdec: state.hwdec };
+          break;
         case 'video-codec':            state.videoCodec = typeof data === 'string' ? data : undefined; break;
         case 'demuxer-cache-duration': state.cacheAhead = typeof data === 'number' ? data : undefined; break;
         case 'frame-drop-count':       state.droppedFrames = typeof data === 'number' ? data : undefined; break;
@@ -273,13 +342,43 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
           if (state.audioOutput) cancelAudioRecovery();
           break;
         case 'audio-device-list': onAudioDevicesChanged(); break;
+        case 'video-params/gamma':
+          setMediaVideo('gamma', data);
+          if (data) scheduleDynamicProbe();
+          break;
+        case 'video-params/primaries':  setMediaVideo('primaries', data); break;
+        case 'video-params/pixelformat': setMediaVideo('pixelformat', data); break;
+        case 'video-params/w':          setMediaVideo('w', data); break;
+        case 'video-params/h':          setMediaVideo('h', data); break;
+        case 'video-params/max-cll':    setMediaVideo('max-cll', data); break;
+        case 'video-params/max-fall':   setMediaVideo('max-fall', data); break;
+        case 'video-params/max-luma':   setMediaVideo('max-luma', data); break;
+        case 'video-target-params/gamma':
+          state.media = { ...state.media, target: data ? { gamma: data } : undefined };
+          break;
+        case 'audio-out-params/format':
+          state.media = { ...state.media, audioOut: data ? { format: data } : undefined };
+          break;
+        case 'chapter-list':
+          state.chapters = Array.isArray(data)
+            // Discs and many files leave chapters unnamed — number them instead.
+        ? data.filter((c: any) => typeof c?.time === 'number').map((c: any, i: number) => ({ title: c.title || `Chapter ${i + 1}`, time: c.time }))
+            : [];
+          break;
         case 'track-list':
           if (Array.isArray(data)) {
             state.tracks = data.map((t: any) => ({
               id: t.id, type: t.type, title: t.title, lang: t.lang,
               selected: !!t.selected, codec: t.codec,
-              channels: t['demux-channel-count'] ?? undefined,
+              channels: t['demux-channel-count'] ?? t['audio-channels'] ?? undefined,
+              forced: !!t.forced, default: !!t.default, external: !!t.external,
+              profile: t['codec-profile'] ?? undefined,
+              hearingImpaired: !!t['hearing-impaired'],
             }));
+            // media.ts reads the playing tracks raw: codec profile, Dolby Vision
+            // record, sample rate — whatever this mpv build reports.
+            const playing = (type: string) => data.find((t: any) => t.type === type && t.selected);
+            state.media = { ...state.media, videoTrack: playing('video'), audioTrack: playing('audio') };
             if (audioDropped()) scheduleAudioRecovery();
           }
           break;
@@ -306,20 +405,43 @@ async function ready(): Promise<boolean> {
   return initMpv(); // starts init if needed; memoized, so only one mpv is spawned
 }
 
-export async function mpvLoad(path: string, startSeconds = 0): Promise<void> {
+/** A Blu-ray or DVD: an ISO, or the folder that holds BDMV / VIDEO_TS. */
+export interface DiscSource {
+  kind: 'bluray' | 'dvd';
+  /** Blu-ray playlist number ("00800.mpls" → 800); absent = the main feature. */
+  playlist?: number;
+}
+
+/**
+ * The mpv URL that plays `path`. A disc is opened through libbluray / libdvdnav
+ * with the ISO or folder as the device, so menus are skipped and the longest
+ * title — the film — plays, with the disc's chapters and every audio and
+ * subtitle stream.
+ */
+async function urlFor(path: string, disc?: DiscSource): Promise<string> {
+  if (!disc) return path;
+  await setProperty(disc.kind === 'bluray' ? 'bluray-device' : 'dvd-device', path);
+  if (disc.kind === 'dvd') return 'dvd://';
+  return disc.playlist !== undefined ? `bd://mpls/${disc.playlist}` : 'bd://';
+}
+
+export async function mpvLoad(path: string, startSeconds = 0, disc?: DiscSource): Promise<void> {
   cancelAudioRecovery();
   state.ended = false;
-  state.tracks = []; state.audioId = null; state.subId = null;
+  state.tracks = []; state.audioId = null; state.subId = null; state.secondarySubId = null;
   state.videoAspect = null; _dw = 0; _dh = 0;
+  state.media = {}; state.chapters = [];
+  if (dynamicProbe) { clearTimeout(dynamicProbe); dynamicProbe = null; }
   if (!(await ready())) throw new Error('mpv engine is not running');
   // Resume: start the file AT the saved position via a file-local option, so mpv
   // applies it as it opens the file. Unlike a seek fired after load, this can never
   // be dropped. mpv >= 0.38 loadfile syntax: loadfile <url> <flags> <index> <options>.
+  const url = await urlFor(path, disc);
   const loadArgs: (string | number)[] = startSeconds > 0
     // Keep sub-second precision — Math.floor() threw away up to a second on every
     // resume, so "continue where I left off" always landed slightly early.
-    ? [path, 'replace', 0, `start=${startSeconds.toFixed(3)}`]
-    : [path];
+    ? [url, 'replace', 0, `start=${startSeconds.toFixed(3)}`]
+    : [url];
   // Retry: loading a network stream (or a cold engine) can transiently fail.
   await retry(() => command('loadfile', loadArgs) as Promise<unknown>, 3, 250);
   await setProperty('pause', false);
@@ -335,6 +457,83 @@ export async function mpvCycleSubVisibility(): Promise<void> {
 export async function mpvSetAudioTrack(id: number): Promise<void> {
   if (!(await ready())) return;
   await setProperty('aid', id as any);
+}
+
+/**
+ * Send Dolby (Digital, Digital Plus, TrueHD — with Atmos) and DTS (incl. DTS-HD
+ * MA and DTS:X) to the AV receiver as a bitstream instead of decoding them here.
+ * Only a receiver or soundbar can render Atmos and DTS:X objects; decoded on the
+ * PC they play as their 5.1/7.1 bed. Other formats keep decoding as usual.
+ *
+ * mpv picks "decode or pass through" when it builds the audio decoder, so a
+ * change mid-file re-selects the track (verified against mpv: an output reload
+ * alone keeps decoding). Before mpv starts, it only sets the starting value.
+ */
+export async function mpvSetPassthrough(on: boolean): Promise<void> {
+  passthrough = on;
+  if (!initialized) return;
+  await setProperty('audio-spdif', on ? SPDIF_CODECS : '');
+  const aid = state.audioId;
+  if (aid === null) return;
+  await setProperty('aid', 'no' as any);
+  await setProperty('aid', aid as any);
+}
+
+// ---------------------------------------------------------------------------
+// What this mpv build can decode. Read once mpv is up and kept, so Settings can
+// show it without starting the engine just to ask.
+// ---------------------------------------------------------------------------
+
+const STORAGE_CAPS = 'prevplayer_mpv_caps';
+
+export interface MpvCapabilities { mpv?: string; ffmpeg?: string; decoders: { codec?: string }[] }
+
+async function recordCapabilities(): Promise<void> {
+  try {
+    const [decoders, mpv, ffmpeg] = await Promise.all([
+      getProperty<{ codec?: string }[]>('decoder-list'),
+      getProperty<string>('mpv-version').catch(() => undefined),
+      getProperty<string>('ffmpeg-version').catch(() => undefined),
+    ]);
+    if (!Array.isArray(decoders)) return;
+    const caps: MpvCapabilities = { mpv, ffmpeg, decoders: decoders.map(d => ({ codec: d.codec })) };
+    localStorage.setItem(STORAGE_CAPS, JSON.stringify(caps));
+  } catch { /* an older plugin or mpv — Settings just won't list them */ }
+}
+
+/** The last capability report, or null if mpv hasn't run on this PC yet. */
+export function mpvCapabilities(): MpvCapabilities | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_CAPS);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+/**
+ * After Windows switches HDR on or off under a playing video: re-send the
+ * colour-space hint, so mpv re-reads what the screen can show now instead of
+ * keeping the swap chain it opened with.
+ */
+export async function mpvRefreshColorspace(): Promise<void> {
+  if (!initialized) return;
+  await setProperty('target-colorspace-hint', false).catch(() => {});
+  await setProperty('target-colorspace-hint', true).catch(() => {});
+}
+
+/** Show a second subtitle above the first, or null for none. */
+export async function mpvSetSecondarySubtitle(id: number | null): Promise<void> {
+  if (!(await ready())) return;
+  await setProperty('secondary-sid', (id === null ? 'no' : id) as any);
+}
+
+/**
+ * Read several properties at once, for Stats for nerds. One that this mpv
+ * lacks, or that has no value right now, comes back undefined.
+ */
+export async function mpvGetProperties(names: readonly string[]): Promise<Record<string, any>> {
+  if (!initialized) return {};
+  const values = await Promise.all(names.map(n => getProperty<any>(n).catch(() => undefined)));
+  return Object.fromEntries(names.map((n, i) => [n, values[i]]));
 }
 
 /** Select an embedded/added subtitle track by id, or null to turn subtitles off. */

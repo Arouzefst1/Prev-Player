@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, Pause, Maximize2, X, Pin, PinOff, RotateCcw, RotateCw, SkipBack, SkipForward, Volume2, Volume1, VolumeX } from 'lucide-react';
+import { useShortcutKeys, withKey } from '../shortcuts';
 
 type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West';
 
@@ -68,6 +69,7 @@ const PipOverlay: React.FC<PipOverlayProps> = ({
   onPlayPause, onSkip, onSeek, onSeekStart, onSeekEnd, onVolume, onToggleMute,
   onTogglePin, onExpand, onClose, onNext, onPrev,
 }) => {
+  const keys = useShortcutKeys();
   const [density, setDensity] = useState<Density>(() => densityFor(window.innerWidth));
   const [hovered, setHovered] = useState(false);
   const [volOpen, setVolOpen] = useState(false);
@@ -179,7 +181,7 @@ const PipOverlay: React.FC<PipOverlayProps> = ({
               {isPinned ? <Pin size={t.icon - 3} /> : <PinOff size={t.icon - 3} />}
             </button>
           )}
-          <button onClick={onExpand} className={chipBtn} title="Back to full player (p)">
+          <button onClick={onExpand} className={chipBtn} title={withKey('Back to full player', keys.pip)}>
             <Maximize2 size={t.icon - 3} />
           </button>
           <button onClick={onClose} className={`${chipBtn} hover:bg-red-600/80`} title="Close mini player (Esc)">
@@ -191,14 +193,14 @@ const PipOverlay: React.FC<PipOverlayProps> = ({
       {/* ---- Centre transport ---- */}
       <div className={`absolute inset-0 flex items-center justify-center gap-2 sm:gap-3 ${fade} ${visible ? 'opacity-100' : 'opacity-0'}`}>
         {density === 'md' && hasPrev && (
-          <button onClick={onPrev} className={`${pe} text-white/75 hover:text-white transition-colors active:scale-90`} title="Previous (b)">
+          <button onClick={onPrev} className={`${pe} text-white/75 hover:text-white transition-colors active:scale-90`} title={withKey('Previous', keys.prev)}>
             <SkipBack size={t.side} fill="currentColor" />
           </button>
         )}
         <button
           onClick={() => onSkip(-10)}
           className={`${pe} text-white/85 hover:text-white transition-colors active:scale-90`}
-          title="Back 10s (j)"
+          title={withKey('Back 10s', keys.back10)}
         >
           <RotateCcw size={density === 'xs' ? 18 : 22} strokeWidth={2.2} />
         </button>
@@ -215,12 +217,12 @@ const PipOverlay: React.FC<PipOverlayProps> = ({
         <button
           onClick={() => onSkip(10)}
           className={`${pe} text-white/85 hover:text-white transition-colors active:scale-90`}
-          title="Forward 10s (l)"
+          title="Forward 10s"
         >
           <RotateCw size={density === 'xs' ? 18 : 22} strokeWidth={2.2} />
         </button>
         {density === 'md' && hasNext && (
-          <button onClick={onNext} className={`${pe} text-white/75 hover:text-white transition-colors active:scale-90`} title="Next (n)">
+          <button onClick={onNext} className={`${pe} text-white/75 hover:text-white transition-colors active:scale-90`} title={withKey('Next', keys.next)}>
             <SkipForward size={t.side} fill="currentColor" />
           </button>
         )}
@@ -291,7 +293,7 @@ const PipOverlay: React.FC<PipOverlayProps> = ({
                 title="Volume"
               />
             </div>
-            <button onClick={onToggleMute} className={`${pe} flex items-center justify-center text-white/90 hover:text-white transition-colors active:scale-90`} title={isMuted ? 'Unmute (m)' : 'Mute (m)'}>
+            <button onClick={onToggleMute} className={`${pe} flex items-center justify-center text-white/90 hover:text-white transition-colors active:scale-90`} title={withKey(isMuted ? 'Unmute' : 'Mute', keys.mute)}>
               {isMuted || volume === 0
                 ? <VolumeX size={t.icon} className="text-red-400" />
                 : volume < 0.5 ? <Volume1 size={t.icon} /> : <Volume2 size={t.icon} />}

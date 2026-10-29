@@ -3,8 +3,11 @@ use tauri::{Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri_plugin_deep_link::DeepLinkExt;
 
+mod disc;
+mod display;
 mod engine;
 mod firewall;
+mod frames;
 mod share;
 mod updater;
 
@@ -22,6 +25,10 @@ fn get_initial_files(state: State<InitialFiles>) -> Vec<String> {
 /// never hand the mpv plugin a bogus path.
 #[tauri::command]
 fn bundled_mpv_path(app: tauri::AppHandle) -> Option<String> {
+    mpv_binary(&app)
+}
+
+pub(crate) fn mpv_binary(app: &tauri::AppHandle) -> Option<String> {
     let p = app
         .path()
         .resolve("resources/mpv/mpv.exe", tauri::path::BaseDirectory::Resource)
@@ -86,6 +93,8 @@ pub fn run() {
             }
             // One engine owns every transfer: LAN shares, streams, downloads.
             engine::init(app.handle())?;
+            // Thumbnails and probes from a second, headless mpv.
+            frames::init(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -114,6 +123,14 @@ pub fn run() {
             engine::engine_tuning,
             engine::engine_set_tuning,
             firewall::lan_allow_firewall,
+            display::display_hdr,
+            display::display_set_hdr,
+            display::display_match_rate,
+            display::display_restore,
+            disc::disc_probe,
+            frames::frames_probe,
+            frames::frames_grab,
+            frames::frames_release,
             updater::update_check,
             updater::update_pending,
             updater::update_install
@@ -124,7 +141,9 @@ pub fn run() {
         // their .partial files and resume next launch.
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                display::restore_all();
                 engine::shutdown(app);
+                frames::shutdown(app);
             }
         });
 }
