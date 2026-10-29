@@ -92,9 +92,26 @@ npx tauri build --bundles nsis
 ```
 
 That produces the installer and its `.sig` under
-`src-tauri/target/release/bundle/nsis/`. The updater manifest (`latest.json`) is
-written by hand — Tauri doesn't emit one — with the `.sig` contents as
-`signature`, and published alongside the installer on a GitHub release.
+`src-tauri/target/release/bundle/nsis/`. Tauri doesn't emit the updater manifest,
+so generate it next to them:
+
+```bash
+npm run release:manifest -- "What changed, in one line"
+```
+
+It checks the three versions agree, takes the signature from the `.sig`, and
+marks the release `"silent": true`. Publish the installer, its `.sig` and
+`latest.json` on a GitHub release tagged `v<version>`, marked **latest** (not a
+draft or pre-release — the updater only reads `releases/latest`).
+
+A silent release reaches every install on 1.5.2 or newer without anyone doing
+anything: it downloads in the background, installs when the user closes the
+app, and the next launch is the new version. Pass `--announce` to leave the
+flag off: a minor or major bump then shows a "ready, installs when you close
+the app" toast with a *Restart now* button (a patch bump stays quiet either
+way). Installs older than 1.5.2 apply
+it the way their own build does (1.3.2–1.5.1: installs and relaunches at
+launch; 1.3.1 and earlier: a dialog).
 
 The **private signing key lives outside this repository and must stay there.**
 Only the signature and the public key (in `tauri.conf.json`) are ever published.
