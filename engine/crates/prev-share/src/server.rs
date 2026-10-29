@@ -6,7 +6,7 @@
 //! can't be guessed by a neighbour on the same Wi-Fi.
 
 use crate::hashing::{HashState, LazyHash};
-use crate::{content_type, require_local_ip};
+use crate::{content_type, require_local_ips};
 use prev_core::{parse_range, sha256_hex, EngineError, RangeReq, Result, ShareFile, ShareLink};
 use std::collections::HashMap;
 use std::io::{Seek, SeekFrom};
@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Request, Response, StatusCode};
 
 /// How many request threads the server runs. Media streaming holds a connection
-/// open for the whole response, so a handful of threads is the difference
-/// between "one receiver at a time" and "a household".
-const DEFAULT_THREADS: usize = 8;
+/// open for the whole response, and a receiver pulls a folder as every file at
+/// once, several chunks each — with too few threads the rest queue, and a video
+/// being watched waits behind them.
+const DEFAULT_THREADS: usize = 32;
 
 struct FileEntry {
     name: String,
@@ -34,7 +35,9 @@ enum Entry {
 struct Inner {
     http: Arc<tiny_http::Server>,
     port: u16,
-    host: String,
+    /// A fixed address to advertise (tests, loopback-only servers); otherwise
+    /// the machine's addresses are looked up for every share.
+    advertise: Option<String>,
     shares: Mutex<HashMap<String, Entry>>,
     running: AtomicBool,
     counter: AtomicU64,
@@ -68,8 +71,8 @@ impl ShareServer {
         Self::start_with(Some("127.0.0.1:0"), Some("127.0.0.1".into()), 4)
     }
 
-    /// `bind` defaults to `0.0.0.0:0`; `advertise_host` defaults to the detected
-    /// LAN IP and is what ends up inside share links.
+    /// `bind` defaults to `0.0.0.0:0`; `advertise_host` defaults to the
+    /// machine's LAN addresses and is what ends up inside share links.
     pub fn start_with(bind: Option<&str>, advertise_host: Option<String>, threads: usize) -> Result<Self> {
         let bind = bind.unwrap_or("0.0.0.0:0");
         let http = tiny_http::Server::http(bind)
@@ -79,15 +82,10 @@ impl ShareServer {
             .to_ip()
             .map(|a| a.port())
             .ok_or_else(|| EngineError::Other("share server has no port".into()))?;
-        let host = match advertise_host {
-            Some(h) => h,
-            None => require_local_ip()?,
-        };
-
         let inner = Arc::new(Inner {
             http: Arc::new(http),
             port,
-            host,
+            advertise: advertise_host,
             shares: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
             counter: AtomicU64::new(0),
@@ -113,7 +111,27 @@ impl ShareServer {
     }
 
     pub fn base_url(&self) -> String {
-        format!("http://{}:{}", self.0.host, self.0.port)
+        let host = self.hosts().ok().and_then(|h| h.into_iter().next());
+        format!("http://{}:{}", host.as_deref().unwrap_or("127.0.0.1"), self.0.port)
+    }
+
+    /// Addresses for a new link, best first. Looked up per share rather than
+    /// once at startup: the server lives as long as the app, and a laptop that
+    /// has changed networks since its first share would otherwise go on handing
+    /// out an address from the old one.
+    fn hosts(&self) -> Result<Vec<String>> {
+        match &self.0.advertise {
+            Some(h) => Ok(vec![h.clone()]),
+            None => require_local_ips(),
+        }
+    }
+
+    /// Base URL on the best address, and the rest as the link's alternatives.
+    fn addressing(&self) -> Result<(String, Option<Vec<String>>)> {
+        let hosts = self.hosts()?;
+        let base = format!("http://{}:{}", hosts[0], self.0.port);
+        let alt = (hosts.len() > 1).then(|| hosts[1..].to_vec());
+        Ok((base, alt))
     }
 
     /// Publish a single file. Returns the link to hand to the receiver.
@@ -125,7 +143,7 @@ impl ShareServer {
         }
         let name = file_name(&path);
         let id = self.next_id(&name);
-        let base = self.base_url();
+        let (base, alt_hosts) = self.addressing()?;
 
         self.0.shares.lock().unwrap().insert(
             id.clone(),
@@ -134,6 +152,7 @@ impl ShareServer {
 
         let mut link = ShareLink::file("lan", format!("{base}/s/{id}"), name, meta.len());
         link.hash_url = Some(format!("{base}/h/{id}"));
+        link.alt_hosts = alt_hosts;
         Ok(link)
     }
 
@@ -145,7 +164,7 @@ impl ShareServer {
         let mut files = Vec::with_capacity(paths.len());
         let mut share_files = Vec::with_capacity(paths.len());
         let id = self.next_id(folder_name);
-        let base = self.base_url();
+        let (base, alt_hosts) = self.addressing()?;
 
         for (i, p) in paths.iter().enumerate() {
             let meta = std::fs::metadata(p)?;
@@ -172,7 +191,9 @@ impl ShareServer {
             .unwrap()
             .insert(id.clone(), Entry::Folder { name: folder_name.to_string(), files });
 
-        Ok(ShareLink::folder("lan", format!("{base}/f/{id}"), folder_name, share_files))
+        let mut link = ShareLink::folder("lan", format!("{base}/f/{id}"), folder_name, share_files);
+        link.alt_hosts = alt_hosts;
+        Ok(link)
     }
 
     /// Revoke a share. The link stops resolving immediately, mid-transfer.

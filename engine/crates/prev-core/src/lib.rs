@@ -28,7 +28,7 @@ pub use event::{
     Verification,
 };
 pub use hash::{sha256_hex, Sha256Stream};
-pub use link::{ShareFile, ShareKind, ShareLink, SCHEME};
+pub use link::{url_host, ShareFile, ShareKind, ShareLink, SCHEME};
 pub use map::ChunkMap;
 pub use meter::SpeedMeter;
 pub use mime::{content_type, is_media};

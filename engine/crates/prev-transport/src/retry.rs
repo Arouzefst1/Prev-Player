@@ -16,8 +16,13 @@ pub struct RetryPolicy {
 }
 
 impl Default for RetryPolicy {
+    /// Rides out about half a minute of trouble per chunk (0.5 + 1 + 2 + 4 + 8 +
+    /// 8 + 8 s of backoff). One failed chunk fails the whole download, and the
+    /// old ~2 s budget meant a Wi-Fi hiccup — roaming between access points, a
+    /// sender's adapter waking from power saving — ended the transfer with an
+    /// error. A stopped share isn't retried at all (see `SHARE_GONE`).
     fn default() -> Self {
-        Self { attempts: 4, base_delay_ms: 250, max_delay_ms: 4_000 }
+        Self { attempts: 8, base_delay_ms: 500, max_delay_ms: 8_000 }
     }
 }
 

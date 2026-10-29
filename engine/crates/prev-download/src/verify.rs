@@ -102,10 +102,7 @@ impl Integrity {
 }
 
 async fn fetch_digest(url: &str, budget: Duration) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .user_agent("PREV-Player/engine")
-        .build()
-        .ok()?;
+    let client = prev_transport::http_client(url).ok()?;
     let deadline = std::time::Instant::now() + budget;
     loop {
         if let Ok(resp) = client.get(url).send().await {

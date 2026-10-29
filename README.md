@@ -47,6 +47,14 @@ Everything reduces to **one engine link**, and after that there is only one path
 Then: `engine.resolve(link)` → what's in it, `engine.watch(link, i)` → a local
 seekable URL for mpv, `engine.download(link, indices, dir)` → transfers.
 
+A Local Wi-Fi link carries **every** LAN address the sender has (a VPN, WSL or
+Hyper-V adapter, or a second network card can each own the "obvious" one), and
+the receiver asks all of them at once and uses whichever serves the share. When
+none answers, the usual cause is Windows Firewall on the sender — Windows marks
+home Wi-Fi as *Public* and blocks incoming connections there — which the
+**Allow through firewall** button in the sender's Share window fixes with one
+UAC prompt.
+
 A folder share you are watching online opens one stream at a time — the session
 for an item is created when you reach it and freed when you leave, because
 opening all of them up front would mean one prefetching buffer per file.

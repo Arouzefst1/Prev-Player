@@ -254,6 +254,13 @@ export async function lanShareFolder(
 export function lanStop(id: string): Promise<void> { return engine.stopShare(id).then(() => {}); }
 export function lanStopAll(): Promise<void> { return engine.stopAllShares(); }
 
+/**
+ * Let other devices on this network reach the share server through Windows
+ * Firewall, which blocks it on networks marked Public — Windows' default for
+ * home Wi-Fi. Shows one UAC prompt; see src-tauri/src/firewall.rs.
+ */
+export function lanAllowFirewall(): Promise<void> { return invoke('lan_allow_firewall'); }
+
 // ---- receiver: any link → one engine link ---------------------------------
 
 /**

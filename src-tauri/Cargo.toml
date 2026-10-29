@@ -35,6 +35,10 @@ tauri-plugin-deep-link = "2"
 
 # Auto-updater: checks the signed `latest.json` manifest, downloads + installs
 # the new build, then `tauri-plugin-process` is used to relaunch the app.
+# Windows Firewall: the elevated script is passed base64-encoded (see firewall.rs).
+[target."cfg(windows)".dependencies]
+base64 = "0.22"
+
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
