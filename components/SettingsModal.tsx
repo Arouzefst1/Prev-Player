@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import {
   X, Settings as SettingsIcon, FolderOpen, RotateCcw,
-  SlidersHorizontal, Play, PictureInPicture2, Download, RefreshCw,
+  SlidersHorizontal, Play, PictureInPicture2, Download, RefreshCw, Tv, Check, Minus,
 } from 'lucide-react';
 import { AppSettings } from '../settings';
 import * as engine from '../engine';
+import { mpvCapabilities } from '../mpv';
+import { capabilitiesFrom, type DisplayHdr } from '../media';
+import { currentDisplayHdr } from '../display';
 
 interface SettingsModalProps {
   open: boolean;
@@ -19,13 +22,14 @@ interface SettingsModalProps {
   onCheckUpdates?: () => void;
 }
 
-type SectionId = 'general' | 'playback' | 'pip' | 'downloads';
+type SectionId = 'general' | 'playback' | 'av' | 'pip' | 'downloads';
 
-const SECTION_ORDER: SectionId[] = ['general', 'playback', 'pip', 'downloads'];
+const SECTION_ORDER: SectionId[] = ['general', 'playback', 'av', 'pip', 'downloads'];
 
 const SECTION_META: Record<SectionId, { title: string; desc: string; Icon: React.ElementType }> = {
   general:   { title: 'General',            desc: 'Library layout and what happens when you add videos', Icon: SlidersHorizontal },
   playback:  { title: 'Playback',           desc: 'How videos start, resume, and move through a queue',  Icon: Play },
+  av:        { title: 'Picture & sound',    desc: 'HDR, Dolby Vision, Dolby Atmos and DTS:X',            Icon: Tv },
   pip:       { title: 'Picture-in-Picture', desc: 'Behaviour and geometry of the floating mini player',  Icon: PictureInPicture2 },
   downloads: { title: 'Downloads & updates', desc: 'Where files land and when to look for new versions', Icon: Download },
 };
@@ -118,8 +122,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   // Everything starts collapsed so the modal opens as a clean list of topics.
   const [openSections, setOpenSections] = useState<Record<SectionId, boolean>>({
-    general: false, playback: false, pip: false, downloads: false,
+    general: false, playback: false, av: false, pip: false, downloads: false,
   });
+
+  // Picture & sound: the screen's HDR state (asked of Windows) and what the
+  // bundled mpv can decode (recorded the last time it ran).
+  const [display, setDisplay] = useState<DisplayHdr | null>(null);
+  useEffect(() => { if (open) currentDisplayHdr().then(setDisplay); }, [open]);
+  const caps = open ? mpvCapabilities() : null;
 
   // Engine tuning lives in the backend, not in AppSettings: it has to be read
   // before the first window exists, and a running stream can't be re-sized.
@@ -141,7 +151,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const allOpen = SECTION_ORDER.every(id => openSections[id]);
   const toggleAll = () => {
     const next = !allOpen;
-    setOpenSections({ general: next, playback: next, pip: next, downloads: next });
+    setOpenSections({ general: next, playback: next, av: next, pip: next, downloads: next });
   };
   const toggle = (id: SectionId) => setOpenSections(s => ({ ...s, [id]: !s[id] }));
 
@@ -255,6 +265,61 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 ))}
               </select>
             </Row>
+          </Section>
+
+          {/* Picture & sound */}
+          <Section id="av" open={openSections.av} onToggle={() => toggle('av')}>
+            <Row
+              title="HDR"
+              desc={display?.enabled
+                ? 'This screen is in HDR — HDR10, HDR10+, HLG and Dolby Vision play in HDR.'
+                : display?.supported
+                  ? 'This screen supports HDR but it’s off, so HDR video is converted to SDR. Turn on “Use HDR” in Windows Settings › System › Display.'
+                  : display
+                    ? 'This screen is SDR. HDR10, HDR10+, HLG and Dolby Vision are tone-mapped to look right on it.'
+                    : 'HDR10, HDR10+, HLG and Dolby Vision play in HDR on an HDR screen, and are tone-mapped on others.'}
+            >
+              {display && (
+                <span className={`text-[11px] font-semibold px-2 py-1 rounded-md border ${display.enabled
+                  ? 'text-amber-200 border-amber-300/40 bg-amber-400/10'
+                  : 'text-neutral-300 border-neutral-700 bg-neutral-800/60'}`}
+                >
+                  {display.enabled ? 'HDR on' : display.supported ? 'HDR off' : 'SDR screen'}
+                </span>
+              )}
+            </Row>
+            <Row
+              title="Send Dolby Atmos & DTS:X to my receiver"
+              desc="For an AV receiver or soundbar on HDMI or optical: Dolby Digital, Dolby Digital Plus, TrueHD and DTS (incl. DTS-HD MA) go out untouched, so it can play Atmos and DTS:X. Leave off for speakers or headphones on this PC — they’d get silence. Volume is set on the receiver while it’s on."
+            >
+              <Toggle checked={settings.audioPassthrough} onChange={(v) => onChange({ audioPassthrough: v })} />
+            </Row>
+            <div className="py-3">
+              <div className="text-sm font-medium text-white">Formats this player decodes</div>
+              {caps ? (
+                <>
+                  <div className="text-xs text-neutral-500 mt-0.5 leading-snug">
+                    {[caps.mpv, caps.ffmpeg && `FFmpeg ${caps.ffmpeg}`].filter(Boolean).join(' · ')}
+                  </div>
+                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                    {capabilitiesFrom(caps.decoders).map(c => (
+                      <span
+                        key={c.label}
+                        title={c.ok ? undefined : 'Not in the bundled mpv — a newer mpv.exe adds it'}
+                        className={`inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border ${c.ok
+                          ? 'text-neutral-200 border-neutral-700 bg-neutral-800/60'
+                          : 'text-neutral-500 border-neutral-800 bg-transparent line-through decoration-neutral-600'}`}
+                      >
+                        {c.ok ? <Check size={11} className="text-green-400" /> : <Minus size={11} />}
+                        {c.label}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-neutral-500 mt-0.5 leading-snug">Play any video once and this fills in.</div>
+              )}
+            </div>
           </Section>
 
           {/* Picture-in-Picture */}

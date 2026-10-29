@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { X, Info, FolderOpen, Copy, Check } from 'lucide-react';
 import { formatTime } from '../utils';
 import { getMpvState, subscribeMpv, type MpvState } from '../mpv';
+import { useMediaInfo } from './FormatBadges';
 
 export interface PropertiesTarget {
   name: string;
@@ -26,6 +27,21 @@ const fmtSize = (b?: number) => {
   return `${n.toFixed(n < 10 && i > 0 ? 2 : 0)} ${u[i]}`;
 };
 
+/** A titled block of fields. */
+const Group: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <div className="mt-5">
+    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-neutral-400 mb-2.5">{title}</div>
+    <div className="grid grid-cols-2 gap-x-4 gap-y-3.5">{children}</div>
+  </div>
+);
+
+/** A full-width note under a group — what to do about what it says. */
+const Hint: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="col-span-2 text-xs leading-snug text-amber-200/90 bg-amber-400/10 border border-amber-300/20 rounded-lg px-3 py-2">
+    {children}
+  </div>
+);
+
 /** One label + value. Blank values show a dash rather than collapsing the row. */
 const Field: React.FC<{ label: string; value?: string | null }> = ({ label, value }) => (
   <div className="min-w-0">
@@ -40,16 +56,17 @@ const PropertiesModal: React.FC<Props> = ({ open, onClose, target }) => {
   // state rather than snapshotting it when the dialog opens.
   const [mpv, setMpv] = useState<MpvState>(() => getMpvState());
   useEffect(() => { if (open) return subscribeMpv(setMpv); }, [open]);
+  const { info, display } = useMediaInfo(open);
 
   const [copied, setCopied] = useState(false);
   const [revealError, setRevealError] = useState('');
 
   if (!open || !target) return null;
 
-  const audio = mpv.tracks?.find(t => t.type === 'audio' && t.id === mpv.audioId)
-    ?? mpv.tracks?.find(t => t.type === 'audio');
-  const channels = (audio as any)?.channels ?? (audio as any)?.demuxChannelCount;
   const ext = target.name.includes('.') ? target.name.split('.').pop()!.toLowerCase() : '';
+  const a = info.audio;
+  const m = info.mastering;
+  const hdrRange = info.range && info.range.kind !== 'sdr';
 
   const copyPath = async () => {
     try { await navigator.clipboard.writeText(target.path); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch {}
@@ -93,16 +110,59 @@ const PropertiesModal: React.FC<Props> = ({ open, onClose, target }) => {
           <div className="grid grid-cols-2 gap-x-4 gap-y-3.5">
             <Field label="Length" value={mpv.duration ? formatTime(mpv.duration) : null} />
             <Field label="Item type" value={ext ? `.${ext}` : (mpv.fileFormat ?? null)} />
-            <Field label="Resolution" value={mpv.width && mpv.height ? `${mpv.width} × ${mpv.height}` : null} />
+            <Field
+              label="Resolution"
+              value={mpv.width && mpv.height
+                ? `${mpv.width} × ${mpv.height}${info.resolution && info.resolution !== 'SD' ? ` (${info.resolution})` : ''}`
+                : null}
+            />
             <Field label="Frame rate" value={mpv.fps ? `${mpv.fps.toFixed(3)} fps` : null} />
-            <Field label="Video codec" value={mpv.videoCodec ?? null} />
-            <Field label="Audio channels" value={channels ? String(channels) : (audio?.lang ?? null)} />
             <Field label="Size" value={fmtSize(target.size ?? mpv.fileSize)} />
             <Field
               label="Decoding"
               value={mpv.hwdec && mpv.hwdec !== 'no' ? `Hardware (${mpv.hwdec})` : mpv.hwdec === 'no' ? 'Software' : null}
             />
           </div>
+
+          {(info.range || info.videoCodec) && (
+            <Group title="Picture">
+              <Field label="Format" value={info.range ? [info.range.label, info.range.detail].filter(Boolean).join(' · ') : null} />
+              <Field
+                label="Shown as"
+                value={!hdrRange ? (info.range ? 'SDR' : null)
+                  : info.output === 'hdr' ? 'HDR on this screen'
+                  : info.output === 'tone-mapped' ? 'SDR (tone-mapped)'
+                  : null}
+              />
+              <Field label="Codec" value={[info.videoCodec, info.bitDepth ? `${info.bitDepth}-bit` : null].filter(Boolean).join(' · ') || null} />
+              <Field
+                label="Mastering"
+                value={m ? [m.maxCll && `MaxCLL ${m.maxCll} nits`, m.maxFall && `MaxFALL ${m.maxFall}`].filter(Boolean).join(' · ') : null}
+              />
+              {hdrRange && info.output === 'tone-mapped' && (
+                <Hint>
+                  {display?.supported
+                    ? 'This screen can show HDR, but HDR is off — so it’s converted to SDR. Turn on “Use HDR” in Windows Settings › System › Display to see it in HDR.'
+                    : 'This screen is SDR, so the HDR picture is tone-mapped to look right on it.'}
+                </Hint>
+              )}
+            </Group>
+          )}
+
+          {a && (
+            <Group title="Sound">
+              <Field label="Format" value={[a.format, a.immersive].filter(Boolean).join(' + ')} />
+              <Field label="Channels" value={a.channels ?? null} />
+              <Field label="Sample rate" value={a.sampleRate ? `${+(a.sampleRate / 1000).toFixed(1)} kHz` : null} />
+              <Field label="Output" value={a.passthrough ? 'Bitstream to receiver' : 'Decoded on this PC'} />
+              {a.immersive && !a.passthrough && (
+                <Hint>
+                  {a.immersive} plays here as its {a.channels ?? 'surround'} base. For the full {a.immersive} mix on a
+                  receiver or soundbar, turn on “Send Dolby Atmos & DTS:X to my receiver” in Settings › Picture &amp; sound.
+                </Hint>
+              )}
+            </Group>
+          )}
 
           <div className="mt-4">
             <div className="text-[11px] text-neutral-500">{target.streaming ? 'Source' : 'File location'}</div>

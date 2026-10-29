@@ -11,6 +11,7 @@ import {
 } from '../share';
 import * as engine from '../engine';
 import { settingsStore } from '../settings';
+import { MEDIA_EXT_LIST, isMediaPath } from '../formats';
 
 type Mode = 'menu' | 'connect' | 'method' | 'receive' | 'sharing' | 'manage';
 type ShareMethod = 'lan' | 'github';
@@ -161,7 +162,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
 
   const pickAndShareFile = async () => {
     const { open } = await import('@tauri-apps/plugin-dialog');
-    const sel = await open({ multiple: false, filters: [{ name: 'Media', extensions: ['mp4','mkv','avi','mov','webm','m4v','wmv','flv','ts','mpg','mpeg','mp3','flac','m4a','wav','aac','opus','ogg'] }] });
+    const sel = await open({ multiple: false, filters: [{ name: 'Media', extensions: MEDIA_EXT_LIST }] });
     if (!sel || typeof sel !== 'string') return;
     const name = sel.split(/[\\/]/).pop() || 'video';
     beginShare({ kind: 'file', path: sel, name });
@@ -173,11 +174,10 @@ const ShareModal: React.FC<ShareModalProps> = ({
     if (!dir || typeof dir !== 'string') return;
     const { readDir } = await import('@tauri-apps/plugin-fs');
     const { join } = await import('@tauri-apps/api/path');
-    const rx = /\.(mp4|mkv|avi|mov|webm|m4v|wmv|flv|ts|mpg|mpeg|mp3|flac|m4a|wav|aac|opus|ogg)$/i;
     const entries = await readDir(dir);
     const files: { path: string; name: string }[] = [];
     for (const e of entries) {
-      if ((e as any).isFile && rx.test(e.name)) files.push({ path: await join(dir, e.name), name: e.name });
+      if ((e as any).isFile && isMediaPath(e.name)) files.push({ path: await join(dir, e.name), name: e.name });
     }
     if (!files.length) { setError('No media files found in that folder.'); return; }
     const folderName = dir.split(/[\\/]/).pop() || 'folder';

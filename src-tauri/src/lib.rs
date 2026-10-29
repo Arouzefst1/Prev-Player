@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri_plugin_deep_link::DeepLinkExt;
 
+mod display;
 mod engine;
 mod firewall;
 mod share;
@@ -114,6 +115,7 @@ pub fn run() {
             engine::engine_tuning,
             engine::engine_set_tuning,
             firewall::lan_allow_firewall,
+            display::display_hdr,
             updater::update_check,
             updater::update_pending,
             updater::update_install

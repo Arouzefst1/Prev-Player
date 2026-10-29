@@ -39,6 +39,12 @@ export interface AppSettings {
   autoCheckUpdates: boolean;
   /** Folder received/downloaded videos are saved to (null → Downloads/PREV Player). */
   downloadPath: string | null;
+  /**
+   * Send Dolby and DTS audio to an AV receiver / soundbar undecoded, so it can
+   * render Atmos and DTS:X. Off by default: speakers or headphones plugged into
+   * the PC would get silence.
+   */
+  audioPassthrough: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -54,6 +60,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   speedStep: 0.5,
   autoCheckUpdates: true,
   downloadPath: null,
+  audioPassthrough: false,
 };
 
 const STORAGE_SETTINGS = 'prevplayer_settings';

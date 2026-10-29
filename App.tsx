@@ -9,8 +9,9 @@ import DownloadsPanel from './components/DownloadsPanel';
 import SettingsModal from './components/SettingsModal';
 import PropertiesModal, { type PropertiesTarget } from './components/PropertiesModal';
 import { useSettings } from './settings';
-import { mpvStop, getMpvState, shutdownMpv } from './mpv';
+import { mpvStop, getMpvState, shutdownMpv, mpvSetPassthrough } from './mpv';
 import * as engine from './engine';
+import { VIDEO_EXT_LIST, AUDIO_EXT_LIST, MEDIA_EXT_LIST, isMediaPath, isAudioPath } from './formats';
 import {
   srtToVtt,
   extractVideoThumbnail,
@@ -28,22 +29,8 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const VIDEO_EXT_LIST = ['mp4','webm','mkv','avi','mov','wmv','flv','ogv','ogg','m4v','3gp','3g2','ts','mts','m2ts','vob','mpg','mpeg'];
-const AUDIO_EXT_LIST = ['mp3','m4a','aac','wav','flac','opus','oga','weba','wma','mka','aiff','aif'];
-const MEDIA_EXT_LIST = [...VIDEO_EXT_LIST, ...AUDIO_EXT_LIST];
-
-// Accepts both video and audio (the <video> element plays audio files too).
-const MEDIA_EXTENSIONS = new Set(MEDIA_EXT_LIST.map(e => '.' + e));
-
-function isVideoPath(p: string): boolean {
-  const ext = '.' + p.split('.').pop()?.toLowerCase();
-  return MEDIA_EXTENSIONS.has(ext);
-}
-
-function isAudioPath(p: string): boolean {
-  const ext = p.split('.').pop()?.toLowerCase() ?? '';
-  return AUDIO_EXT_LIST.includes(ext);
-}
+// Accepts both video and audio — the full list lives in formats.ts.
+const isVideoPath = isMediaPath;
 
 function typeFromPath(p: string): string {
   const ext = p.split('.').pop()?.toLowerCase() ?? '';
@@ -148,6 +135,9 @@ function App() {
   // Ref mirror so callbacks read the latest settings without being in their deps.
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  // Dolby / DTS to the receiver: applied live, and as mpv's starting value if it
+  // hasn't started yet (mpvSetPassthrough never starts it just for this).
+  useEffect(() => { mpvSetPassthrough(settings.audioPassthrough).catch(() => {}); }, [settings.audioPassthrough]);
 
   // Ref mirror of the library so add-handlers can reorder from the freshest list
   // without depending on (and re-creating themselves for) every library change.

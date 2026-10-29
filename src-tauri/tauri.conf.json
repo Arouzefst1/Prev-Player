@@ -32,13 +32,13 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "fileAssociations": [
       {
-        "ext": ["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ogv", "ogg", "3gp", "3g2", "ts", "mts", "m2ts", "vob", "mpg", "mpeg"],
+        "ext": ["mkv", "mk3d", "mp4", "m4v", "mov", "webm", "avi", "divx", "wmv", "asf", "flv", "f4v", "ts", "mts", "m2ts", "vob", "evo", "mpg", "mpeg", "m2v", "mxf", "ogv", "ogg", "ogm", "rm", "rmvb", "3gp", "3g2", "hevc", "h265", "265", "h264", "264", "ivf", "obu", "vvc", "266"],
         "name": "Video File",
         "description": "Video files",
         "role": "Viewer"
       },
       {
-        "ext": ["mp3", "m4a", "aac", "wav", "flac", "opus", "oga", "weba", "wma", "mka", "aiff", "aif"],
+        "ext": ["ac3", "eac3", "ec3", "thd", "mlp", "dts", "dtshd", "flac", "alac", "wav", "w64", "aiff", "aif", "ape", "wv", "tak", "tta", "dsf", "dff", "caf", "mp3", "mp2", "m4a", "m4b", "aac", "opus", "oga", "weba", "wma", "mpc", "mka"],
         "name": "Audio File",
         "description": "Audio files",
         "role": "Viewer"

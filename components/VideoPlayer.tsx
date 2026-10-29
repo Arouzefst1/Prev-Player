@@ -9,6 +9,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
+import FormatBadges from './FormatBadges';
 import PipOverlay from './PipOverlay';
 import { nextLoopMode, type LoopMode } from './LoopButton';
 import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, clearVideoProgress, isTypingTarget } from '../utils';
@@ -344,7 +345,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Latest observed mpv state — the adapter's getters read from here.
   const mpvStateRef = useRef<MpvState>({
     paused: true, currentTime: 0, duration: 0, volume: 1, muted: false, speed: 1, ended: false,
-    tracks: [], audioId: null, subId: null, videoAspect: null,
+    tracks: [], audioId: null, subId: null, videoAspect: null, media: {},
   });
   const endedFiredRef = useRef<boolean>(false);
   /** Have we seen the CURRENT file actually playing yet? Guards stale eof ticks. */
@@ -1649,6 +1650,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         >
           <FolderOpen size={18} className="sm:w-5 sm:h-5 group-hover:text-red-400 transition-colors" />
         </button>
+      )}
+
+      {/* What's playing: resolution, HDR / Dolby Vision, bit depth, Atmos… */}
+      {!isPip && (
+        <FormatBadges
+          visible={showControls}
+          className={`absolute z-30 max-w-[55%] ${onFileSelect ? 'left-11 top-[11px] sm:left-[60px] sm:top-[22px]' : 'left-2 top-2 sm:left-4 sm:top-4'}`}
+        />
       )}
 
       {/* Overlay Animations — same behaviour in the mini-player as at full size,
