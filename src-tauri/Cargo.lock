@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "prev-player"
-version = "1.5.4"
+version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "prev-core",
