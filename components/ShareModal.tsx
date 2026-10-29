@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X, Share2, Link2, Download, Play, Copy, Check, Loader2, KeyRound, AlertCircle,
-  Folder, ExternalLink, Wifi, Cloud, Square, Trash2, ListChecks,
+  Folder, ExternalLink, Wifi, Cloud, Square, Trash2, ListChecks, ShieldCheck,
 } from 'lucide-react';
 import {
   isShareConnected, getShareUser, connectGitHub, disconnectShare,
   shareFile, shareFolder, toEngineLink, shareDownloadDir,
-  lanShareFile, lanShareFolder, lanStop,
+  lanShareFile, lanShareFolder, lanStop, lanAllowFirewall,
   listMyShares, deleteShare, type MyShare,
 } from '../share';
 import * as engine from '../engine';
@@ -42,6 +42,9 @@ interface ShareModalProps {
   onOpenByName: (name: string) => void;
 }
 
+// Windows Firewall is what usually stops a same-Wi-Fi receiver from connecting.
+const IS_WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+
 const fmtSize = (b: number) => {
   if (!b) return '0 B';
   const u = ['B', 'KB', 'MB', 'GB']; let i = 0; let n = b;
@@ -67,6 +70,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
   const [shareMethod, setShareMethod] = useState<ShareMethod>('lan');
   const [lanId, setLanId] = useState<string | null>(null);
   const [job, setJob] = useState<ShareJob | null>(null);
+  const [firewall, setFirewall] = useState<'idle' | 'working' | 'done'>('idle');
 
   // manage (my shares)
   const [myShares, setMyShares] = useState<MyShare[]>([]);
@@ -87,7 +91,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
   useEffect(() => {
     if (!open) return;
     setError(''); setCopied(false); setShareLink(''); setResolved(null);
-    setLanId(null);
+    setLanId(null); setFirewall('idle');
     if (initialLink) {
       setMode('receive'); setLinkInput(initialLink); doResolve(initialLink);
     } else if (shareTarget) {
@@ -143,6 +147,12 @@ const ShareModal: React.FC<ShareModalProps> = ({
     if (!isShareConnected()) { pendingRef.current = j; setMode('connect'); return; }
     runGithubShare(j);
   }, [runGithubShare]);
+
+  const allowFirewall = useCallback(async () => {
+    setFirewall('working'); setError('');
+    try { await lanAllowFirewall(); setFirewall('done'); }
+    catch (e: any) { setError(e?.message || String(e)); setFirewall('idle'); }
+  }, []);
 
   const stopLanShare = useCallback(async () => {
     if (lanId) { try { await lanStop(lanId); } catch {} setLanId(null); }
@@ -272,7 +282,7 @@ const ShareModal: React.FC<ShareModalProps> = ({
         <div className="p-5">
           {error && (
             <div className="mb-4 flex items-start gap-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" /><span>{error}</span>
+              <AlertCircle size={16} className="mt-0.5 shrink-0" /><span className="whitespace-pre-line">{error}</span>
             </div>
           )}
 
@@ -424,6 +434,24 @@ const ShareModal: React.FC<ShareModalProps> = ({
                         Send this to someone on the <b>same Wi‑Fi</b>. Nothing is uploaded — it streams from your
                         device. Keep PREV Player open; the link dies when you stop or close it.
                       </p>
+                      {IS_WINDOWS && (
+                        <div className="flex items-center justify-between gap-3 rounded-lg bg-neutral-900/70 border border-neutral-800 px-3 py-2">
+                          <span className="text-[11px] text-neutral-400 leading-snug">
+                            {firewall === 'done'
+                              ? 'Allowed — ask them to open the link again.'
+                              : 'Other device can’t connect? Windows Firewall is the usual reason.'}
+                          </span>
+                          {firewall !== 'done' && (
+                            <button
+                              onClick={allowFirewall} disabled={firewall === 'working'}
+                              className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-[11px] font-medium text-neutral-200 disabled:opacity-60 transition-colors"
+                            >
+                              {firewall === 'working' ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                              Allow through firewall
+                            </button>
+                          )}
+                        </div>
+                      )}
                       <button onClick={stopLanShare} className="w-full mt-1 py-2 rounded-lg bg-neutral-800 hover:bg-red-600/20 text-sm font-medium text-neutral-200 hover:text-red-300 flex items-center justify-center gap-2 transition-colors">
                         <Square size={14} /> Stop sharing
                       </button>

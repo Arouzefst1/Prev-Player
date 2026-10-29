@@ -51,10 +51,7 @@ impl FolderManifest {
 }
 
 pub async fn fetch_manifest(url: &str) -> Result<FolderManifest> {
-    let body = reqwest::Client::builder()
-        .user_agent("PREV-Player/engine")
-        .build()
-        .map_err(EngineError::transport)?
+    let body = crate::http_client(url)?
         .get(url)
         .send()
         .await

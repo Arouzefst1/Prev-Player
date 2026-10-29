@@ -10,6 +10,7 @@ prev-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
+if-addrs.workspace = true
 
 [dev-dependencies]
 prev-transport.workspace = true

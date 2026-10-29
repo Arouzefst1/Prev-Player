@@ -4,7 +4,7 @@
 //! from a source is byte-range reads, and that is exactly what HTTP/1.1 ranges
 //! give us.
 
-use crate::{SourceMeta, Transport};
+use crate::{http_client, SourceMeta, Transport};
 use async_trait::async_trait;
 use prev_core::{EngineError, Result};
 use reqwest::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
@@ -18,14 +18,9 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(url: &str) -> Result<Self> {
-        let client = Client::builder()
-            .user_agent("PREV-Player/engine")
-            .connect_timeout(Duration::from_secs(10))
-            // No total-request timeout on purpose: a single 16 MB chunk over a
-            // slow link is legitimately slow, and stalls are caught by retry.
-            .build()
-            .map_err(EngineError::transport)?;
-        Ok(Self { client, url: url.to_string() })
+        // No total-request timeout on purpose: a single 16 MB chunk over a slow
+        // link is legitimately slow; a dead sender is caught by keepalive.
+        Ok(Self { client: http_client(url)?, url: url.to_string() })
     }
 
     /// Reuse an existing client (connection pool, proxy config, auth headers).
@@ -50,6 +45,60 @@ impl HttpTransport {
             .filter(|s| !s.is_empty())
             .unwrap_or("download");
         percent_decode(last)
+    }
+}
+
+/// What a receiver is told when the sender no longer serves the file. A LAN
+/// share answers 404 once it is stopped; a GitHub share once it is deleted.
+pub const SHARE_GONE: &str =
+    "This share isn't available any more — the sender stopped it, closed PREV Player, or removed it. Ask them to share it again.";
+
+/// A request that never got an HTTP answer, worded for a person. reqwest's own
+/// message ("error sending request for url") hides the reason, which lives in
+/// the error's source chain.
+fn request_failed(e: reqwest::Error) -> EngineError {
+    let what = if e.is_connect() {
+        "couldn't connect to the sender"
+    } else if e.is_timeout() {
+        "the sender stopped responding"
+    } else {
+        "the connection to the sender failed"
+    };
+    let mut cause = String::new();
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        cause = s.to_string();
+        src = s.source();
+    }
+    let at = e.url().and_then(|u| u.host_str().map(|h| format!(" at {h}"))).unwrap_or_default();
+    if cause.is_empty() {
+        EngineError::Transport(format!("{what}{at}"))
+    } else {
+        EngineError::Transport(format!("{what}{at} ({cause})"))
+    }
+}
+
+/// What one address said when asked for a share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// The share is served here.
+    Serves,
+    /// Something answered, but not with this share (a stopped share says 404).
+    Missing,
+    /// Nothing answered in time.
+    Unreachable,
+}
+
+/// Ask `url` for its first byte, within `timeout`. Used to pick which of a LAN
+/// sender's addresses this device can actually reach. It asks for the share
+/// itself rather than a health check, so an unrelated server that happens to
+/// sit at one of those addresses on this network can't be mistaken for it.
+pub async fn probe(url: &str, timeout: Duration) -> Probe {
+    let Ok(client) = http_client(url) else { return Probe::Unreachable };
+    match client.get(url).header(RANGE, "bytes=0-0").timeout(timeout).send().await {
+        Ok(resp) if resp.status().is_success() => Probe::Serves,
+        Ok(_) => Probe::Missing,
+        Err(_) => Probe::Unreachable,
     }
 }
 
@@ -95,9 +144,12 @@ impl Transport for HttpTransport {
             .header(RANGE, "bytes=0-0")
             .send()
             .await
-            .map_err(EngineError::transport)?;
+            .map_err(request_failed)?;
 
         let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(EngineError::Other(SHARE_GONE.into()));
+        }
         if !status.is_success() {
             return Err(EngineError::Transport(format!(
                 "source returned HTTP {status}"
@@ -158,9 +210,13 @@ impl Transport for HttpTransport {
             .header(RANGE, format!("bytes={offset}-{end}"))
             .send()
             .await
-            .map_err(EngineError::transport)?;
+            .map_err(request_failed)?;
 
         let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            // Not retryable: a stopped share stays stopped.
+            return Err(EngineError::Other(SHARE_GONE.into()));
+        }
         if status == StatusCode::OK && offset > 0 {
             // Whole body for a mid-file range: we would have to download from
             // zero to reach `offset`. Refuse rather than silently burn traffic.
@@ -174,7 +230,7 @@ impl Transport for HttpTransport {
 
         out.clear();
         let want = len as usize;
-        while let Some(c) = resp.chunk().await.map_err(EngineError::transport)? {
+        while let Some(c) = resp.chunk().await.map_err(request_failed)? {
             let remaining = want - out.len();
             if c.len() >= remaining {
                 out.extend_from_slice(&c[..remaining]);
