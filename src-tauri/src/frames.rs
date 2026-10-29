@@ -4,7 +4,7 @@
 // file only hands it the bundled mpv and moves the calls off the UI thread.
 // ===========================================================================
 
-use prev_frames::{FrameEngine, Lane, Probe};
+use prev_frames::{FrameEngine, Lane, Probe, Storyboard};
 use tauri::{AppHandle, Manager, State};
 
 pub struct FramesState(pub FrameEngine);
@@ -40,10 +40,19 @@ pub async fn frames_probe(app: AppHandle, path: String) -> Result<Probe, String>
     blocking(app, move |e| e.probe(&path)).await
 }
 
-/// A JPEG data URL of the frame near `at` seconds, or null for audio.
+/// A JPEG data URL of the frame at `at` seconds — the keyframe before it,
+/// or with `exact` that very frame — or null for audio.
 #[tauri::command]
-pub async fn frames_grab(app: AppHandle, path: String, at: f64, lane_name: String) -> Result<Option<String>, String> {
-    blocking(app, move |e| e.frame(lane(&lane_name), &path, at)).await
+pub async fn frames_grab(app: AppHandle, path: String, at: f64, lane_name: String, exact: Option<bool>) -> Result<Option<String>, String> {
+    blocking(app, move |e| e.frame(lane(&lane_name), &path, at, exact.unwrap_or(false))).await
+}
+
+/// A frame for every second of `path`, for seek-bar previews — or null when
+/// the file is too big to decode end to end (previews then come from
+/// `frames_grab`).
+#[tauri::command]
+pub async fn frames_storyboard(app: AppHandle, path: String) -> Result<Option<Storyboard>, String> {
+    blocking(app, move |e| e.storyboard(&path)).await
 }
 
 #[tauri::command]
