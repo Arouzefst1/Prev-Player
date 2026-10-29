@@ -528,6 +528,24 @@ export const videoOrderStore = {
   },
 };
 
+/**
+ * Arrange the library by the saved order.
+ *
+ * The videos live in IndexedDB but their order lives in localStorage, and the
+ * two aren't written together: a download never touches the order at all, and
+ * the WebView can drop a localStorage write that hadn't been flushed when the
+ * app closed. A video the order doesn't know about is therefore one added after
+ * it was last saved — so it goes on top, newest first. Sinking it to the end
+ * (behind every other video, in IndexedDB's random-id order) is what made a
+ * just-opened video look like it had vanished from the library.
+ */
+export function applyVideoOrder(videos: VideoMeta[], order: string[]): VideoMeta[] {
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const unranked = videos.filter(v => !rank.has(v.id)).sort((a, b) => b.addedAt - a.addedAt);
+  const ranked = videos.filter(v => rank.has(v.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+  return [...unranked, ...ranked];
+}
+
 // ==========================================================================
 // Keyboard routing
 // ==========================================================================
