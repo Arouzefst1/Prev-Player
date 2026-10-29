@@ -18,6 +18,7 @@ import {
   videoStore,
   VideoMeta,
   videoOrderStore,
+  applyVideoOrder,
   loadVideoProgress,
   saveVideoProgress,
   folderProgressStore,
@@ -458,10 +459,13 @@ function App() {
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const boot = async () => {
-      // Load persisted library
+      // Load persisted library — in the saved order, not IndexedDB's (random-id)
+      // key order. promoteToTop persists whatever order this list is in, so
+      // loading it unsorted reshuffled the whole library the first time a video
+      // was opened.
       let metas: VideoMeta[] = [];
       try {
-        metas = await videoStore.getAllMeta();
+        metas = applyVideoOrder(await videoStore.getAllMeta(), videoOrderStore.getOrder());
         setVideoLibrary(metas);
       } catch {}
 
@@ -1457,8 +1461,13 @@ function App() {
     if (newIdx >= 0) setCurrentIndex(newIdx);
   }, [playlist, currentIndex]);
 
+  // Reorder the in-memory library too: promoteToTop saves its order from this
+  // list, so leaving it stale undid a drag the next time any video was opened.
   const handleReorderVideos = useCallback((orderedIds: string[]) => {
     videoOrderStore.setOrder(orderedIds);
+    const next = applyVideoOrder(videoLibraryRef.current, orderedIds);
+    videoLibraryRef.current = next;
+    setVideoLibrary(next);
   }, []);
 
   const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
