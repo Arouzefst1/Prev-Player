@@ -10,6 +10,10 @@ import { CSS } from '@dnd-kit/utilities';
 import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
 import FormatBadges from './FormatBadges';
+import StatsForNerds from './StatsForNerds';
+import PlayerContextMenu from './PlayerContextMenu';
+import { useTrackHelpers } from './useTrackHelpers';
+import { useDisplayMatch } from './useDisplayMatch';
 import PipOverlay from './PipOverlay';
 import { nextLoopMode, type LoopMode } from './LoopButton';
 import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, clearVideoProgress, isTypingTarget } from '../utils';
@@ -24,7 +28,11 @@ import {
   mpvSetAudioTrack, mpvSetSubtitleTrack, mpvFetchVideoAspect, mpvGetDuration,
   type MpvState, type MpvTrack,
 } from '../mpv';
-import { settingsStore } from '../settings';
+import { settingsStore, useSettings } from '../settings';
+import { releaseFrames } from '../frames';
+import { actionFor, useShortcutKey } from '../shortcuts';
+import { isForcedTrack } from '../tracks';
+import { probeDisc, discName, type DiscInfo } from '../disc';
 
 /**
  * Minimal HTMLVideoElement-like surface backed by mpv. We point `videoRef` at one
@@ -345,7 +353,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Latest observed mpv state — the adapter's getters read from here.
   const mpvStateRef = useRef<MpvState>({
     paused: true, currentTime: 0, duration: 0, volume: 1, muted: false, speed: 1, ended: false,
-    tracks: [], audioId: null, subId: null, videoAspect: null, media: {},
+    tracks: [], audioId: null, subId: null, videoAspect: null, media: {}, chapters: [],
   });
   const endedFiredRef = useRef<boolean>(false);
   /** Have we seen the CURRENT file actually playing yet? Guards stale eof ticks. */
@@ -409,6 +417,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [audioId, setAudioId] = useState<number | null>(null);
   const [subId, setSubId] = useState<number | null>(null);
   const [trackMenu, setTrackMenu] = useState<null | 'audio' | 'sub'>(null);
+  /** The file's chapters — seek-bar preview titles and the gaps in the bar. */
+  const [chapters, setChapters] = useState<MpvState['chapters']>([]);
+  const [showStats, setShowStats] = useState(false);
+  /** Right-click menu position (relative to the player), or null when closed. */
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const statsKey = useShortcutKey('stats');
+  const loopKey = useShortcutKey('loop');
+  /** Second subtitle line (Settings › Audio & subtitles), null when none. */
+  const [secondarySubId, setSecondarySubId] = useState<number | null>(null);
+  /** The Blu-ray / DVD being played (Settings › Playback), null for a file. */
+  const [disc, setDisc] = useState<DiscInfo | null>(null);
+  /** A Blu-ray title picked from the right-click menu; undefined = the main feature. */
+  const discTitleRef = useRef<number | undefined>(undefined);
+  const [discTitle, setDiscTitle] = useState<number | undefined>(undefined);
+  const discPathRef = useRef<string | undefined>(undefined);
   
   // UI State
   const [showControls, setShowControls] = useState(true);
@@ -428,6 +451,23 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [resumeFrom, setResumeFrom] = useState<number | null>(null);
   /** Running target during a wheel burst, so fast scrolls don't collapse to one step. */
   const wheelBurstRef = useRef({ at: 0, volume: 1 });
+
+  // Opt-in track helpers: smart audio, remembered tracks, forced / second
+  // subtitles, subtitles on skip-back. The mount-once mpv subscription and the
+  // stable skip() reach them through the ref.
+  const trackHelpers = useTrackHelpers({
+    videoId, path, loadGen: loadGenRef.current, tracks, audioId, subId, secondarySubId, subtitlesEnabled, mpvStateRef,
+  });
+  const trackHelpersRef = useRef(trackHelpers);
+  trackHelpersRef.current = trackHelpers;
+
+  // Opt-in: switch the screen to HDR / a matching refresh rate while playing.
+  const [displaySettings] = useSettings();
+  useDisplayMatch(displaySettings.autoHdr, displaySettings.matchRefreshRate);
+
+  // The seek-bar preview keeps its file open in the frame engine between hovers;
+  // let it go when the player does.
+  useEffect(() => () => { releaseFrames('preview'); }, []);
 
   // --- Effect: Codec Support Detection ---
   useEffect(() => {
@@ -554,7 +594,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setTracks(s.tracks);
         setAudioId(s.audioId);
         setSubId(s.subId);
+        setSecondarySubId(s.secondarySubId ?? null);
+        trackHelpersRef.current.tick(s.currentTime);
         setVideoAspect(s.videoAspect);
+        setChapters(s.chapters);
 
         // Only attribute a position to the file mpv has actually confirmed open,
         // and only while that's still the video we're showing.
@@ -710,31 +753,45 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // the user just asked for it, and it carries positions continue-watching
       // would refuse (the first few seconds). It's spent on use, so replaying the
       // same clip later goes back to the ordinary rules.
+      // A new path starts on the disc's main feature; a title switch keeps its pick.
+      if (discPathRef.current !== path) {
+        discPathRef.current = path;
+        discTitleRef.current = undefined;
+        setDiscTitle(undefined);
+      }
+      const discInfo = settingsStore.get().discPlayback ? await probeDisc(path) : null;
+      if (cancelled) return;
+      setDisc(discInfo);
+      const otherTitle = discTitleRef.current !== undefined;
+
       let startSeconds = 0;
       const override = startAtRef.current;
       const usingOverride = !!override && !!videoId && override.videoId === videoId && override.time > 0;
       if (usingOverride) {
         startSeconds = override!.time;
         onStartAtUsedRef.current?.();
-      } else if (resumeEnabledRef.current && videoId) {
+      } else if (resumeEnabledRef.current && videoId && !otherTitle) {
         const saved = loadVideoProgress(videoId);
         if (saved && saved >= 5) startSeconds = saved;
       }
 
       try {
-        await mpvLoad(path, startSeconds);
+        await mpvLoad(path, startSeconds, discInfo ? { kind: discInfo.kind, playlist: discTitleRef.current } : undefined);
       } catch (e: any) {
         if (cancelled) return;
         console.error('mpv load failed:', e);
         const msg = typeof e === 'string' ? e : (e?.message ?? String(e));
         setHasError(true);
-        setErrorMessage(`Couldn't open this ${path.startsWith('http') ? 'stream' : 'file'}. ${msg}`);
+        setErrorMessage(discInfo
+          ? `Couldn't open this ${discName(discInfo.kind)}. A copy-protected disc has to be decrypted before any player can open it. ${msg}`
+          : `Couldn't open this ${path.startsWith('http') ? 'stream' : 'file'}. ${msg}`);
         return;
       }
       if (cancelled) return;
 
       // mpv now definitively has THIS file open — safe to attribute positions to it.
-      progressIdRef.current = videoId ?? null;
+      // (An extra on a disc isn't the film: its position isn't the film's to resume.)
+      progressIdRef.current = otherTitle ? null : videoId ?? null;
 
       // Every clip starts at the speed chosen in Settings. `speed` is global in mpv
       // and survives a load, so without this the previous video's speed carried over.
@@ -938,6 +995,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const skip = useCallback((amount: number, showControlsBar = true) => {
     if (!videoRef.current) return;
+    if (amount < 0) trackHelpersRef.current.skippedBack(videoRef.current.currentTime);
     const newTime = Math.max(0, Math.min(videoRef.current.duration || Infinity, videoRef.current.currentTime + amount));
     videoRef.current.currentTime = newTime;
     setCurrentTime(newTime);
@@ -1003,6 +1061,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // "all" is a playlist concern, so it's reported up to App, which owns the
   // wrap-around when the last item finishes.
   const hasQueue = !!playlistInfo && playlistInfo.length > 1;
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  /** Play another title of the Blu-ray (an extra, another cut) from its start. */
+  const pickDiscTitle = useCallback((playlist: number) => {
+    const main = disc?.titles[0]?.playlist;
+    discTitleRef.current = playlist === main ? undefined : playlist;
+    setDiscTitle(discTitleRef.current);
+    setReloadRequest(r => r + 1);
+  }, [disc]);
+
   const toggleLoop = useCallback(() => {
     setLoopMode((m) => nextLoopMode(m, hasQueue));
   }, [hasQueue]);
@@ -1280,13 +1348,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // The library is in front of the player — browsing it must not drive playback.
       if (inputSuspendedRef.current) return;
 
-      // Prevent default for control keys
-      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+      // Which action the key is bound to (Settings › Keyboard shortcuts).
+      const action = e.code === 'Space' ? null : actionFor(e);
+
+      // Keep the page from scrolling or the browser from acting on a bound key.
+      if (action || ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
           e.preventDefault();
       }
 
       // Don't show bottom controls when adjusting volume/mute or using arrow-key skip — only the center overlay should appear
-      const isOverlayOnlyKey = e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.key === 'm' || e.key === 'M';
+      const isOverlayOnlyKey = action === 'forward5' || action === 'back5' || action === 'volumeUp' || action === 'volumeDown' || action === 'mute';
       if (!isOverlayOnlyKey) {
         resetControlsTimer();
       } else if (isPlaying) {
@@ -1317,64 +1388,49 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         return;
       }
 
-      switch (e.key) {
-        case 'k':
-        case 'K':
+      switch (action) {
+        case 'playPause':
           togglePlay();
           break;
-        case 'ArrowRight':
+        case 'forward5':
           skip(5, false);
           break;
-        case 'ArrowLeft':
+        case 'back5':
           skip(-5, false);
           break;
-        case 'l':
-        case 'L':
+        case 'loop':
           toggleLoop();
           break;
-        case 'j':
-        case 'J':
+        case 'back10':
           skip(-10);
           break;
-        case 'ArrowUp':
+        case 'volumeUp':
           handleVolumeChange(volume + 0.05, true, false);
           break;
-        case 'ArrowDown':
+        case 'volumeDown':
           handleVolumeChange(volume - 0.05, true, false);
           break;
-        case 'f':
-        case 'F':
+        case 'fullscreen':
           // Fullscreen and the mini-player are opposite ends of the same axis —
           // from PiP, `f` just steps back out to the full player.
           if (isPip) togglePip();
           else toggleFullscreen();
           break;
-        case 'Escape':
-          // Tauri window fullscreen doesn't auto-exit on Esc like DOM fullscreen.
-          if (isPip) togglePip();
-          else if (isFullscreen) exitFullscreen();
-          else if (showQueue) setShowQueue(false);
-          break;
-        case 'p':
-        case 'P':
+        case 'pip':
           togglePip();
           break;
-        case 'q':
-        case 'Q':
+        case 'queue':
           if (playlistInfo && playlistInfo.length > 1) {
             setShowQueue(q => !q);
           }
           break;
-        case 'n':
-        case 'N':
+        case 'next':
           if (hasNext) onNext?.();
           break;
-        case 'b':
-        case 'B':
+        case 'prev':
           if (hasPrev) onPrev?.();
           break;
-        case 'm':
-        case 'M':
+        case 'mute':
             if (videoRef.current) {
                 const nextState = !isMuted;
                 videoRef.current.muted = nextState;
@@ -1382,27 +1438,35 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 triggerOverlay(nextState ? 'volume-down' : 'volume-up', nextState ? 'Muted' : 'Unmuted');
             }
             break;
-        case 'c':
-        case 'C':
+        case 'subtitles':
             // Toggle subtitles on/off (drives mpv sub-visibility via the effect).
             setSubtitlesEnabled(prev => !prev);
             break;
-        case '>': { // Shift + . — faster by the configurable step
+        case 'faster': { // Shift + . by default — faster by the configurable step
           const step = settingsStore.get().speedStep ?? 0.5;
           changeSpeed(Math.min(4, +(playbackSpeed + step).toFixed(2)), true);
           break;
         }
-        case '<': { // Shift + , — slower by the configurable step
+        case 'slower': { // Shift + , by default — slower by the configurable step
           const step = settingsStore.get().speedStep ?? 0.5;
           changeSpeed(Math.max(0.25, +(playbackSpeed - step).toFixed(2)), true);
           break;
         }
+        case 'stats':
+          if (!isPip) setShowStats(v => !v);
+          break;
         default:
-           // Number keys 0-9
-           if (!isNaN(parseInt(e.key))) {
-               seekToPercentage(parseInt(e.key) * 10);
-           }
-           break;
+          if (e.key === 'Escape') {
+            // Tauri window fullscreen doesn't auto-exit on Esc like DOM fullscreen.
+            if (contextMenu) setContextMenu(null);
+            else if (isPip) togglePip();
+            else if (isFullscreen) exitFullscreen();
+            else if (showQueue) setShowQueue(false);
+          } else if (/^[0-9]$/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            // Number keys 0-9
+            seekToPercentage(parseInt(e.key) * 10);
+          }
+          break;
       }
     };
 
@@ -1492,7 +1556,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       container?.removeEventListener('blur', handleWindowBlur);
       if (spaceHoldTimeoutRef.current) clearTimeout(spaceHoldTimeoutRef.current);
     };
-  }, [togglePlay, skip, volume, toggleFullscreen, exitFullscreen, togglePip, isPip, isFullscreen, showQueue, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay, toggleLoop, loopMode]);
+  }, [togglePlay, skip, volume, toggleFullscreen, exitFullscreen, togglePip, isPip, isFullscreen, showQueue, isMuted, isPlaying, resetControlsTimer, handleVolumeChange, playbackSpeed, changeSpeed, subtitlesEnabled, seekToPercentage, triggerOverlay, toggleLoop, loopMode, contextMenu]);
 
   // Mouse side buttons (back/forward) → previous/next video, or seek ±10s if none.
   useEffect(() => {
@@ -1561,7 +1625,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ref={containerRef}
       className={`relative w-full h-full bg-transparent group overflow-hidden flex flex-col justify-center select-none outline-none ${showControls ? '' : 'cursor-none'}`}
       tabIndex={0} // Allow focus
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (isPip) return; // the mini-player's surface is for dragging
+        const box = containerRef.current?.getBoundingClientRect();
+        if (box) setContextMenu({ x: e.clientX - box.left, y: e.clientY - box.top });
+      }}
       // Wheel = volume. Always at full size; in the mini-player only with the
       // user's say-so (see handleWheel).
       onWheel={handleWheel}
@@ -1759,7 +1828,37 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         showQueue={showQueue}
         onDownload={onDownloadCurrent}
         onShowInfo={onShowInfo}
+        statsOpen={showStats}
+        onToggleStats={() => setShowStats(v => !v)}
+        statsKey={statsKey}
+        previewPath={!isAudio && !disc && path && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path) ? path : undefined}
+        chapters={chapters}
+        videoAspect={videoAspect}
       />
+      )}
+
+      {showStats && !isPip && <StatsForNerds onClose={() => setShowStats(false)} shortcut={statsKey} />}
+
+      {contextMenu && !isPip && (
+        <PlayerContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          loopMode={loopMode}
+          hasQueue={hasQueue}
+          onLoop={setLoopMode}
+          loopKey={loopKey}
+          statsOpen={showStats}
+          onToggleStats={() => setShowStats(v => !v)}
+          statsKey={statsKey}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          onTogglePip={togglePip}
+          onShowInfo={onShowInfo}
+          discTitles={disc?.titles}
+          discTitle={discTitle ?? disc?.titles[0]?.playlist}
+          onPickDiscTitle={pickDiscTitle}
+          onClose={closeContextMenu}
+        />
       )}
 
       {/* Queue Panel */}
@@ -1802,6 +1901,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const subTracks = tracks.filter(t => t.type === 'sub');
         if (audioTracks.length < 2 && subTracks.length === 0) return null;
         const label = (t: MpvTrack, i: number) => t.title || [t.lang, t.codec].filter(Boolean).join(' · ') || `Track ${i + 1}`;
+        // With forced subtitles on, "Off" keeps the forced lines — say so.
+        const forcedOnly = subId !== null && isForcedTrack(tracks, subId) && trackHelpers.offTrack() === subId;
         return (
           <div className={`absolute top-2 right-12 sm:top-4 sm:right-16 z-40 flex items-center gap-1 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
             {audioTracks.length > 1 && (
@@ -1813,7 +1914,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <div className="absolute top-full right-0 mt-2 w-56 max-h-64 overflow-auto custom-scrollbar bg-black/90 rounded-xl p-1.5 shadow-xl border border-white/10 z-50">
                     <p className="text-[10px] uppercase tracking-wider text-neutral-500 px-2 py-1">Audio</p>
                     {audioTracks.map((t, i) => (
-                      <button key={t.id} onClick={() => { mpvSetAudioTrack(t.id); setTrackMenu(null); }}
+                      <button key={t.id} onClick={() => { mpvSetAudioTrack(t.id); trackHelpers.pickedAudio(t); setTrackMenu(null); }}
                         className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-sm text-left text-neutral-200 hover:bg-white/10">
                         <span className="truncate">{label(t, i)}</span>
                         {audioId === t.id && <Check size={15} className="text-red-400 shrink-0" />}
@@ -1831,12 +1932,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 {trackMenu === 'sub' && (
                   <div className="absolute top-full right-0 mt-2 w-56 max-h-64 overflow-auto custom-scrollbar bg-black/90 rounded-xl p-1.5 shadow-xl border border-white/10 z-50">
                     <p className="text-[10px] uppercase tracking-wider text-neutral-500 px-2 py-1">Subtitles</p>
-                    <button onClick={() => { mpvSetSubtitleTrack(null); setTrackMenu(null); }}
+                    <button onClick={() => { mpvSetSubtitleTrack(trackHelpers.offTrack()); trackHelpers.pickedSubtitle(null); setTrackMenu(null); }}
                       className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-sm text-left text-neutral-200 hover:bg-white/10">
-                      <span>Off</span>{subId === null && <Check size={15} className="text-red-400 shrink-0" />}
+                      <span>{forcedOnly ? 'Off (forced only)' : 'Off'}</span>{(subId === null || forcedOnly) && <Check size={15} className="text-red-400 shrink-0" />}
                     </button>
                     {subTracks.map((t, i) => (
-                      <button key={t.id} onClick={() => { mpvSetSubtitleTrack(t.id); setTrackMenu(null); }}
+                      <button key={t.id} onClick={() => { mpvSetSubtitleTrack(t.id); trackHelpers.pickedSubtitle(t); setTrackMenu(null); }}
                         className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-sm text-left text-neutral-200 hover:bg-white/10">
                         <span className="truncate">{label(t, i)}</span>
                         {subId === t.id && <Check size={15} className="text-red-400 shrink-0" />}

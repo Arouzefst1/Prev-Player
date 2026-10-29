@@ -1,4 +1,5 @@
 import React from 'react';
+import { useShortcutKey, withKey } from '../shortcuts';
 
 /**
  * off  — play through once and stop
@@ -33,13 +34,14 @@ interface LoopButtonProps {
  * video looks exactly like it always did.
  */
 const LoopButton: React.FC<LoopButtonProps> = ({ mode, hasQueue, onCycle, size = 20, className = '' }) => {
+  const loopKey = useShortcutKey('loop');
   const active = mode !== 'off';
   const showOneBadge = hasQueue && mode === 'one';
 
   return (
     <button
       onClick={onCycle}
-      title={`${loopModeLabel(mode, hasQueue)} (l)`}
+      title={withKey(loopModeLabel(mode, hasQueue), loopKey)}
       aria-label={loopModeLabel(mode, hasQueue)}
       className={`p-1 transition-all duration-300 active:scale-95 relative ${
         active ? 'text-red-500' : 'text-white/50 hover:text-white'

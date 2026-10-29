@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getMpvState, subscribeMpv } from '../mpv';
-import { describeMedia, badgesFor, type DisplayHdr, type MediaInfo, type RawMedia, type BadgeTone } from '../media';
+import { describeMedia, badgesFor, cardBadgesFor, type DisplayHdr, type MediaInfo, type RawMedia, type BadgeTone } from '../media';
 import { currentDisplayHdr } from '../display';
 
 /**
@@ -34,7 +34,7 @@ export function useMediaInfo(enabled = true): { info: MediaInfo; display: Displa
   return { info, display };
 }
 
-const TONE: Record<BadgeTone, string> = {
+export const TONE: Record<BadgeTone, string> = {
   dolby: 'text-white border-white/40 bg-gradient-to-b from-white/[0.18] to-white/[0.04]',
   hdr: 'text-amber-200 border-amber-300/40 bg-gradient-to-b from-amber-300/[0.22] to-amber-500/[0.06]',
   plain: 'text-white/85 border-white/15 bg-black/55',
@@ -68,3 +68,24 @@ const FormatBadges: React.FC<{ visible: boolean; className?: string }> = ({ visi
 };
 
 export default FormatBadges;
+
+/** The small badges on a library card, from what the probe stored with it. */
+export const CardBadges: React.FC<{ media?: RawMedia; disc?: 'bluray' | 'dvd'; className?: string }> = ({ media, disc, className }) => {
+  const badges = useMemo(() => [
+    ...(disc ? [{ label: disc === 'bluray' ? 'Blu-ray' : 'DVD', tone: 'dolby' as BadgeTone }] : []),
+    ...(media ? cardBadgesFor(describeMedia(media)) : []),
+  ], [media, disc]);
+  if (badges.length === 0) return null;
+  return (
+    <div className={`flex items-center gap-1 ${className ?? ''}`}>
+      {badges.map(b => (
+        <span
+          key={b.label}
+          className={`inline-flex items-center h-[18px] px-1.5 rounded border text-[9.5px] font-bold uppercase tracking-[0.06em] leading-none ${TONE[b.tone]}`}
+        >
+          {b.label}
+        </span>
+      ))}
+    </div>
+  );
+};

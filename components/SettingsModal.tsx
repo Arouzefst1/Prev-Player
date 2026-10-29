@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import {
   X, Settings as SettingsIcon, FolderOpen, RotateCcw,
-  SlidersHorizontal, Play, PictureInPicture2, Download, RefreshCw, Tv, Check, Minus,
+  SlidersHorizontal, Play, PictureInPicture2, Download, RefreshCw, Tv, Check, Minus, Keyboard, Languages,
 } from 'lucide-react';
 import { AppSettings } from '../settings';
 import * as engine from '../engine';
 import { mpvCapabilities } from '../mpv';
 import { capabilitiesFrom, type DisplayHdr } from '../media';
 import { currentDisplayHdr } from '../display';
+import ShortcutsEditor from './ShortcutsEditor';
+import { LANGUAGE_CODES, languageName, preferredLanguage } from '../tracks';
 
 interface SettingsModalProps {
   open: boolean;
@@ -22,14 +24,16 @@ interface SettingsModalProps {
   onCheckUpdates?: () => void;
 }
 
-type SectionId = 'general' | 'playback' | 'av' | 'pip' | 'downloads';
+type SectionId = 'general' | 'playback' | 'av' | 'tracks' | 'keys' | 'pip' | 'downloads';
 
-const SECTION_ORDER: SectionId[] = ['general', 'playback', 'av', 'pip', 'downloads'];
+const SECTION_ORDER: SectionId[] = ['general', 'playback', 'av', 'tracks', 'keys', 'pip', 'downloads'];
 
 const SECTION_META: Record<SectionId, { title: string; desc: string; Icon: React.ElementType }> = {
   general:   { title: 'General',            desc: 'Library layout and what happens when you add videos', Icon: SlidersHorizontal },
   playback:  { title: 'Playback',           desc: 'How videos start, resume, and move through a queue',  Icon: Play },
   av:        { title: 'Picture & sound',    desc: 'HDR, Dolby Vision, Dolby Atmos and DTS:X',            Icon: Tv },
+  tracks:    { title: 'Audio & subtitles',  desc: 'Pick and remember tracks, forced and second subtitles', Icon: Languages },
+  keys:      { title: 'Keyboard shortcuts', desc: 'Change the keys that control the player',             Icon: Keyboard },
   pip:       { title: 'Picture-in-Picture', desc: 'Behaviour and geometry of the floating mini player',  Icon: PictureInPicture2 },
   downloads: { title: 'Downloads & updates', desc: 'Where files land and when to look for new versions', Icon: Download },
 };
@@ -122,7 +126,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   // Everything starts collapsed so the modal opens as a clean list of topics.
   const [openSections, setOpenSections] = useState<Record<SectionId, boolean>>({
-    general: false, playback: false, av: false, pip: false, downloads: false,
+    general: false, playback: false, av: false, tracks: false, keys: false, pip: false, downloads: false,
   });
 
   // Picture & sound: the screen's HDR state (asked of Windows) and what the
@@ -151,7 +155,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const allOpen = SECTION_ORDER.every(id => openSections[id]);
   const toggleAll = () => {
     const next = !allOpen;
-    setOpenSections({ general: next, playback: next, av: next, pip: next, downloads: next });
+    setOpenSections({ general: next, playback: next, av: next, tracks: next, keys: next, pip: next, downloads: next });
   };
   const toggle = (id: SectionId) => setOpenSections(s => ({ ...s, [id]: !s[id] }));
 
@@ -165,6 +169,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const downloadLabel = settings.downloadPath || 'Downloads / PREV Player (default)';
+  const languageOptions = LANGUAGE_CODES.map(c => [c, languageName(c)] as const).sort((a, b) => a[1].localeCompare(b[1]));
 
   return (
     <div
@@ -265,6 +270,29 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 ))}
               </select>
             </Row>
+            <Row
+              title="Blu-ray & DVD"
+              desc="Open Blu-ray and DVD ISO images and BDMV / VIDEO_TS folders as discs: the main feature plays with its chapters and every audio and subtitle track, and other titles are in the right-click menu. Copy-protected discs have to be decrypted first."
+            >
+              <Toggle checked={settings.discPlayback} onChange={(v) => onChange({ discPlayback: v })} />
+            </Row>
+            <Row
+              title={`Stats for nerds — ${Math.round((1 - settings.statsOpacity) * 100)}% see-through`}
+              desc="How much of the video shows through the stats panel (player settings › Stats for nerds)."
+            >
+              <div className="flex items-center gap-2">
+                {/* What the panel will look like over a picture. */}
+                <span className="relative w-9 h-6 rounded-md overflow-hidden border border-neutral-700 bg-[linear-gradient(135deg,#ef4444,#f59e0b_45%,#3b82f6)]">
+                  <span className="absolute inset-1 rounded-sm" style={{ background: `rgba(8,8,10,${settings.statsOpacity})` }} />
+                </span>
+                <input
+                  type="range" min={0} max={0.85} step={0.05} value={+(1 - settings.statsOpacity).toFixed(2)}
+                  onChange={(e) => onChange({ statsOpacity: +(1 - parseFloat(e.target.value)).toFixed(2) })}
+                  className="w-24 accent-red-600 cursor-pointer"
+                  aria-label="Stats for nerds transparency"
+                />
+              </div>
+            </Row>
           </Section>
 
           {/* Picture & sound */}
@@ -287,6 +315,20 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   {display.enabled ? 'HDR on' : display.supported ? 'HDR off' : 'SDR screen'}
                 </span>
               )}
+            </Row>
+            <Row
+              title="Switch to HDR for HDR videos"
+              desc={display && !display.supported
+                ? 'This screen can’t show HDR, so there’s nothing to switch.'
+                : 'Turns on Windows HDR for this screen while an HDR10, HDR10+, HLG or Dolby Vision video plays, and back off afterwards. If HDR is already on, it’s left alone.'}
+            >
+              <Toggle checked={settings.autoHdr} onChange={(v) => onChange({ autoHdr: v })} />
+            </Row>
+            <Row
+              title="Match the refresh rate"
+              desc="Switches the screen to a rate the video’s frame rate divides evenly — 23.976 fps films on 23.976 Hz (or 120 Hz), 25 fps on 50 Hz — so motion doesn’t judder. Your usual rate comes back when you close the player."
+            >
+              <Toggle checked={settings.matchRefreshRate} onChange={(v) => onChange({ matchRefreshRate: v })} />
             </Row>
             <Row
               title="Send Dolby Atmos & DTS:X to my receiver"
@@ -320,6 +362,47 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="text-xs text-neutral-500 mt-0.5 leading-snug">Play any video once and this fills in.</div>
               )}
             </div>
+          </Section>
+
+          {/* Audio & subtitles — all opt-in */}
+          <Section id="tracks" open={openSections.tracks} onToggle={() => toggle('tracks')}>
+            <Row title="Language" desc="For smart audio, forced subtitles and subtitles on skip-back.">
+              <select
+                value={settings.preferredLanguage}
+                onChange={(e) => onChange({ preferredLanguage: e.target.value })}
+                className="max-w-[150px] bg-neutral-800 text-white text-xs rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-red-500 cursor-pointer"
+              >
+                <option value="">Same as Windows ({languageName(preferredLanguage(''))})</option>
+                {languageOptions.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+              </select>
+            </Row>
+            <Row title="Smart audio track" desc="Start on the best audio in your language — lossless and Dolby Atmos / DTS:X first, surround over stereo — and never on a commentary track.">
+              <Toggle checked={settings.smartAudio} onChange={(v) => onChange({ smartAudio: v })} />
+            </Row>
+            <Row title="Remember my picks" desc="The audio and subtitles you choose come back next time, and carry over to the other videos in the same folder — like the next episode.">
+              <Toggle checked={settings.rememberTracks} onChange={(v) => onChange({ rememberTracks: v })} />
+            </Row>
+            <Row title="Forced subtitles" desc="Show signs and foreign-language lines even with subtitles off, in the language you're hearing.">
+              <Toggle checked={settings.forcedSubtitles} onChange={(v) => onChange({ forcedSubtitles: v })} />
+            </Row>
+            <Row title="Second subtitle" desc="A second line in another language above the main subtitles — handy for learning one. Text subtitles only.">
+              <select
+                value={settings.secondSubtitleLanguage}
+                onChange={(e) => onChange({ secondSubtitleLanguage: e.target.value })}
+                className="max-w-[150px] bg-neutral-800 text-white text-xs rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-red-500 cursor-pointer"
+              >
+                <option value="">Off</option>
+                {languageOptions.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+              </select>
+            </Row>
+            <Row title="Subtitles when skipping back" desc="Missed a line? Skip back with subtitles off and they show until you're past where you were.">
+              <Toggle checked={settings.subtitlesOnSkipBack} onChange={(v) => onChange({ subtitlesOnSkipBack: v })} />
+            </Row>
+          </Section>
+
+          {/* Keyboard shortcuts */}
+          <Section id="keys" open={openSections.keys} onToggle={() => toggle('keys')}>
+            <ShortcutsEditor settings={settings} onChange={onChange} />
           </Section>
 
           {/* Picture-in-Picture */}

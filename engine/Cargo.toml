@@ -7,6 +7,7 @@ members = [
     "crates/prev-download",
     "crates/prev-stream",
     "crates/prev-engine",
+    "crates/prev-frames",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ prev-share = { path = "crates/prev-share" }
 prev-download = { path = "crates/prev-download" }
 prev-stream = { path = "crates/prev-stream" }
 prev-engine = { path = "crates/prev-engine" }
+prev-frames = { path = "crates/prev-frames" }
 
 anyhow = "1"
 async-trait = "0.1"

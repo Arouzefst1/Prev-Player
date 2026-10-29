@@ -250,6 +250,21 @@ export function badgesFor(info: MediaInfo): Badge[] {
   return out;
 }
 
+/**
+ * The short version for a library card: only what sets a copy apart at a
+ * glance — 4K/8K, the HDR format, object audio. (Everything else is in
+ * Properties; a card full of "Stereo · AAC" would just be noise.)
+ */
+export function cardBadgesFor(info: MediaInfo): Badge[] {
+  const out: Badge[] = [];
+  if (info.resolution === '4K' || info.resolution === '8K') out.push({ label: info.resolution, tone: 'plain' });
+  const r = info.range;
+  if (r && r.kind !== 'sdr') out.push({ label: r.label, tone: r.kind === 'dolby-vision' ? 'dolby' : 'hdr' });
+  const a = info.audio;
+  if (a?.immersive) out.push({ label: a.immersive === 'Dolby Atmos' ? 'Atmos' : 'DTS:X', tone: a.immersive === 'Dolby Atmos' ? 'dolby' : 'plain' });
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // What this mpv build can decode (Settings → Picture & sound)
 // ---------------------------------------------------------------------------
