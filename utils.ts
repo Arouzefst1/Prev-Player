@@ -507,6 +507,15 @@ export const folderStore = {
     const f = folders.find(f => f.id === folderId);
     if (f) { f.videoIds = videoIds; writeFolders(folders); }
   },
+
+  /** Put the folders in this order (dragged in the library). Any folder the
+   *  list doesn't mention — made elsewhere meanwhile — keeps its place at the end. */
+  reorder(folderIds: string[]): void {
+    const folders = readFolders();
+    const rank = new Map(folderIds.map((id, i) => [id, i]));
+    const listed = folders.filter(f => rank.has(f.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+    writeFolders([...listed, ...folders.filter(f => !rank.has(f.id))]);
+  },
 };
 
 // ==========================================
