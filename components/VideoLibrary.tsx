@@ -9,7 +9,7 @@ import {
   SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore } from '../utils';
+import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore, applyVideoOrder } from '../utils';
 
 // ============================================================
 // Props
@@ -333,21 +333,9 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameFolderValue, setRenameFolderValue] = useState('');
 
-  // Load persisted order & folders on mount
+  // Load persisted order on mount; videos the order doesn't know yet go on top
   useEffect(() => {
-    const savedOrder = videoOrderStore.getOrder();
-    if (savedOrder.length > 0) {
-      // Reorder videos according to saved order; new videos go at the end
-      const orderMap = new Map(savedOrder.map((id, i) => [id, i]));
-      const sorted = [...videos].sort((a, b) => {
-        const ai = orderMap.get(a.id) ?? Infinity;
-        const bi = orderMap.get(b.id) ?? Infinity;
-        return ai - bi;
-      });
-      setOrderedVideos(sorted);
-    } else {
-      setOrderedVideos(videos);
-    }
+    setOrderedVideos(applyVideoOrder(videos, videoOrderStore.getOrder()));
   }, [videos]);
 
   // Reload folders whenever videos list changes (covers PC imports)
