@@ -87,7 +87,7 @@ const OBSERVED = [
   // `video-params` object: that also carries HDR10+ / Dolby Vision dynamic
   // metadata, which changes every scene or frame and would flood this channel.
   // (Fields an older mpv lacks are accepted and simply stay empty.)
-  'video-params/gamma', 'video-params/primaries', 'video-params/pixelformat',
+  'video-params/gamma', 'video-params/primaries', 'video-params/pixelformat', 'video-params/hw-pixelformat',
   'video-params/w', 'video-params/h',
   'video-params/max-cll', 'video-params/max-fall', 'video-params/max-luma',
   'video-target-params/gamma', 'audio-out-params/format',
@@ -348,6 +348,7 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
           break;
         case 'video-params/primaries':  setMediaVideo('primaries', data); break;
         case 'video-params/pixelformat': setMediaVideo('pixelformat', data); break;
+        case 'video-params/hw-pixelformat': setMediaVideo('hw-pixelformat', data); break;
         case 'video-params/w':          setMediaVideo('w', data); break;
         case 'video-params/h':          setMediaVideo('h', data); break;
         case 'video-params/max-cll':    setMediaVideo('max-cll', data); break;

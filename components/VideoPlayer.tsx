@@ -9,7 +9,6 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import PlayerControls from './PlayerControls';
 import ActionOverlay from './ActionOverlay';
-import FormatBadges from './FormatBadges';
 import StatsForNerds from './StatsForNerds';
 import PlayerContextMenu from './PlayerContextMenu';
 import { useTrackHelpers } from './useTrackHelpers';
@@ -30,6 +29,7 @@ import {
 } from '../mpv';
 import { settingsStore, useSettings } from '../settings';
 import { releaseFrames } from '../frames';
+import { prefetchPreviews } from './SeekPreview';
 import { actionFor, useShortcutKey } from '../shortcuts';
 import { isForcedTrack } from '../tracks';
 import { probeDisc, discName, type DiscInfo } from '../disc';
@@ -468,6 +468,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // The seek-bar preview keeps its file open in the frame engine between hovers;
   // let it go when the player does.
   useEffect(() => () => { releaseFrames('preview'); }, []);
+
+  // Seek-bar previews: local files with a picture (not streams, discs or audio).
+  const previewPath = !isAudio && !disc && path && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path) ? path : undefined;
+  // Once the video has started, get its previews ready before the first hover:
+  // open it in the frame engine, and fill in every second where that's cheap.
+  useEffect(() => {
+    if (!previewPath) return;
+    const t = setTimeout(() => prefetchPreviews(previewPath), 1200);
+    return () => clearTimeout(t);
+  }, [previewPath]);
 
   // --- Effect: Codec Support Detection ---
   useEffect(() => {
@@ -1721,13 +1731,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </button>
       )}
 
-      {/* What's playing: resolution, HDR / Dolby Vision, bit depth, Atmos… */}
-      {!isPip && (
-        <FormatBadges
-          visible={showControls}
-          className={`absolute z-30 max-w-[55%] ${onFileSelect ? 'left-11 top-[11px] sm:left-[60px] sm:top-[22px]' : 'left-2 top-2 sm:left-4 sm:top-4'}`}
-        />
-      )}
 
       {/* Overlay Animations — same behaviour in the mini-player as at full size,
           just scaled down: the pill shows and the surrounding chrome gets out of
@@ -1831,7 +1834,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         statsOpen={showStats}
         onToggleStats={() => setShowStats(v => !v)}
         statsKey={statsKey}
-        previewPath={!isAudio && !disc && path && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path) ? path : undefined}
+        previewPath={previewPath}
         chapters={chapters}
         videoAspect={videoAspect}
       />

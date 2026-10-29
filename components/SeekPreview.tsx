@@ -1,69 +1,107 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { grabFrame } from '../frames';
+import { grabFrame, storyboard } from '../frames';
 
 // ---------------------------------------------------------------------------
 // The frame under the pointer on the seek bar (YouTube-style), with the time
-// and the chapter it falls in.
+// and the chapter it falls in — for every second of the video.
 //
-// Frames come from the frame engine's preview lane, which keeps the file open,
-// so each new one is a single keyframe seek (~30 ms). Requests are quantised
-// to a few seconds and cached, and only one is ever in flight: while it runs,
-// the pointer may move on, and when it lands the latest position is asked for
-// next — sweeping the bar never builds up a queue.
+// Frames come from the frame engine (engine/crates/prev-frames):
+//  - A storyboard: for a video cheap enough to decode end to end, one
+//    low-priority pass when it opens fills in every second at once.
+//  - On demand, for anything else: the keyframe first (tens of ms, close
+//    enough while the pointer sweeps), then the exact frame for that second
+//    as soon as the pointer stays — on a long-GOP or single-keyframe file the
+//    keyframe alone would show one picture for many seconds.
+// Only one on-demand request is ever in flight, and the newest position wins,
+// so sweeping the bar never builds up a queue.
 // ---------------------------------------------------------------------------
 
-const CACHE_LIMIT = 300;
-const cache = new Map<string, Map<number, string>>();
-const pump = { busy: false, path: '', next: null as number | null, listeners: new Set<() => void>() };
-/** Files that gave no frame at all (audio, unreadable): the time pill alone. */
-const frameless = new Set<string>();
+/** Exact frames kept per video (~25 KB each); oldest go first. */
+const CACHE_LIMIT = 1500;
 
-function framesOf(path: string): Map<number, string> {
-  let m = cache.get(path);
-  if (!m) {
-    cache.clear(); // one video at a time — drop the last one's frames
-    m = new Map();
-    cache.set(path, m);
-  }
-  return m;
+interface Frames {
+  path: string;
+  /** Second → the frame at that second. */
+  exact: Map<number, string>;
+  /** Second → the keyframe before it, shown until the exact one arrives. */
+  near: Map<number, string>;
+  /** No picture at all (audio, cover-less): the time pill alone. */
+  frameless: boolean;
+  board?: Promise<void>;
 }
 
-async function request(path: string, bucket: number) {
+let current: Frames | null = null;
+const listeners = new Set<() => void>();
+const notify = () => listeners.forEach(l => l());
+
+/** The frames for `path`, dropping the previous video's. */
+function framesOf(path: string): Frames {
+  if (current?.path !== path) current = { path, exact: new Map(), near: new Map(), frameless: false };
+  return current;
+}
+
+function keep(map: Map<number, string>, second: number, url: string) {
+  if (map.size >= CACHE_LIMIT) map.delete(map.keys().next().value!);
+  map.set(second, url);
+}
+
+/**
+ * Start the storyboard for a video that just opened — it also warms up the
+ * preview engine on that file, so the first hover doesn't pay for opening it.
+ */
+export function prefetchPreviews(path: string): void {
+  const f = framesOf(path);
+  if (f.board) return;
+  f.board = storyboard(path)
+    .then(board => {
+      if (!board || current !== f) return;
+      board.frames.forEach((url, i) => {
+        const second = Math.round(i * board.step);
+        if (!f.exact.has(second)) keep(f.exact, second, url);
+      });
+      notify();
+    })
+    .catch(() => {});
+}
+
+/** An exact frame within two seconds of `second`, nearest first. */
+function closeBy(exact: Map<number, string>, second: number): string | undefined {
+  for (const d of [1, -1, 2, -2]) {
+    const url = exact.get(second + d);
+    if (url) return url;
+  }
+  return undefined;
+}
+
+const pump = { busy: false, path: '', next: null as number | null };
+
+async function request(path: string, second: number) {
   pump.path = path;
-  pump.next = bucket;
+  pump.next = second;
   if (pump.busy) return;
   pump.busy = true;
   try {
     while (pump.next !== null) {
-      const [p, b] = [pump.path, pump.next];
+      const [p, sec] = [pump.path, pump.next];
       pump.next = null;
-      if (framesOf(p).has(b)) continue;
-      const url = await grabFrame(p, b, 'preview').catch(() => null);
-      const frames = framesOf(p);
-      if (!url) {
-        if (frames.size === 0) { frameless.add(p); pump.listeners.forEach(l => l()); }
-        continue;
+      const f = framesOf(p);
+      if (f.frameless || f.exact.has(sec)) continue;
+
+      // 1. The keyframe: quick, and good enough while the pointer is moving —
+      //    unless an exact frame a second away already stands in for it.
+      if (!f.near.has(sec) && !closeBy(f.exact, sec)) {
+        const url = await grabFrame(p, sec, 'preview', false).catch(() => undefined);
+        if (url === null && f.exact.size === 0) { f.frameless = true; notify(); continue; }
+        if (url) { keep(f.near, sec, url); notify(); }
+        if (pump.next !== null && pump.next !== sec) continue; // already elsewhere
       }
-      if (frames.size >= CACHE_LIMIT) frames.delete(frames.keys().next().value!);
-      frames.set(b, url);
-      pump.listeners.forEach(l => l());
+      // 2. The exact second, now that the pointer has stayed.
+      const url = await grabFrame(p, sec, 'preview', true).catch(() => undefined);
+      if (url) { keep(f.exact, sec, url); notify(); }
     }
   } finally {
     pump.busy = false;
   }
-}
-
-/** The cached frame closest to `bucket`, so something sensible shows while the exact one loads. */
-function nearest(path: string, bucket: number): string | null {
-  const frames = cache.get(path);
-  if (!frames || frames.size === 0) return null;
-  const exact = frames.get(bucket);
-  if (exact) return exact;
-  let best: [number, string] | null = null;
-  for (const [t, url] of frames) {
-    if (!best || Math.abs(t - bucket) < Math.abs(best[0] - bucket)) best = [t, url];
-  }
-  return best && Math.abs(best[0] - bucket) <= 30 ? best[1] : null;
 }
 
 const fmt = (s: number) => {
@@ -87,22 +125,28 @@ interface Props {
 export const PREVIEW_WIDTH = 192;
 
 const SeekPreview: React.FC<Props> = ({ path, time, duration, left, chapter, aspect }) => {
-  const step = duration > 3600 ? 5 : 2;
-  const bucket = Math.max(0, Math.min(Math.round(time / step) * step, Math.max(0, duration - 0.5)));
+  // The second the time pill shows (it rounds down too).
+  const second = Math.max(0, Math.min(Math.floor(time), Math.floor(Math.max(0, duration - 0.5))));
   const [, redraw] = useState(0);
-  const mounted = useRef(true);
+  /** What the card showed last, held while the next frame loads instead of flashing empty. */
+  const shown = useRef<string | null>(null);
 
   useEffect(() => {
-    mounted.current = true;
-    const l = () => { if (mounted.current) redraw(n => n + 1); };
-    pump.listeners.add(l);
-    return () => { mounted.current = false; pump.listeners.delete(l); };
+    const l = () => redraw(n => n + 1);
+    listeners.add(l);
+    return () => { listeners.delete(l); };
   }, []);
 
-  const framed = !!path && !frameless.has(path);
-  useEffect(() => { if (framed) request(path!, bucket); }, [framed, path, bucket]);
+  const f = path ? framesOf(path) : null;
+  const framed = !!f && !f.frameless;
+  useEffect(() => { if (framed) request(path!, second); }, [framed, path, second]);
 
-  const img = framed ? nearest(path!, bucket) : null;
+  // Best first: this second; an exact frame a second or two away (closer to
+  // the truth than a keyframe that may be far back); the keyframe.
+  const fresh = framed ? f!.exact.get(second) ?? closeBy(f!.exact, second) ?? f!.near.get(second) ?? null : null;
+  if (fresh) shown.current = fresh;
+  const img = framed ? fresh ?? shown.current : null;
+  const waiting = framed && !f!.exact.has(second);
   const height = Math.round(PREVIEW_WIDTH / (aspect > 0.3 ? aspect : 16 / 9));
 
   return (
@@ -115,7 +159,7 @@ const SeekPreview: React.FC<Props> = ({ path, time, duration, left, chapter, asp
             style={{ width: PREVIEW_WIDTH, height }}
           >
             {img
-              ? <img src={img} alt="" className="w-full h-full object-cover" draggable={false} />
+              ? <img src={img} alt="" className={`w-full h-full object-cover transition-opacity duration-150 ${waiting && !fresh ? 'opacity-70' : 'opacity-100'}`} draggable={false} />
               : <div className="w-full h-full animate-pulse bg-gradient-to-br from-neutral-800 to-neutral-900" />}
           </div>
         )}

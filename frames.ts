@@ -17,8 +17,24 @@ export type FrameLane = 'library' | 'preview';
 
 export const probe = (path: string): Promise<Probe> => invoke<Probe>('frames_probe', { path });
 
-export const grabFrame = (path: string, at: number, lane: FrameLane = 'preview'): Promise<string | null> =>
-  invoke<string | null>('frames_grab', { path, at, laneName: lane });
+/**
+ * The frame at `at` seconds: the keyframe before it (quick), or with `exact`
+ * that very frame (decodes forward from the keyframe). Null for audio; rejects
+ * when the file can't be read right now.
+ */
+export const grabFrame = (path: string, at: number, lane: FrameLane = 'preview', exact = false): Promise<string | null> =>
+  invoke<string | null>('frames_grab', { path, at, laneName: lane, exact });
+
+export interface Storyboard {
+  /** Seconds between frames (1). */
+  step: number;
+  /** JPEG data URLs; frame i is at i × step seconds. */
+  frames: string[];
+}
+
+/** A frame for every second of a video that's cheap to decode end to end, else null. */
+export const storyboard = (path: string): Promise<Storyboard | null> =>
+  invoke<Storyboard | null>('frames_storyboard', { path });
 
 export const releaseFrames = (lane: FrameLane): Promise<void> =>
   invoke<void>('frames_release', { laneName: lane }).catch(() => {});
