@@ -1,7 +1,10 @@
-// A release in one command:
+// A release in one command. Releases normally go out by themselves from GitHub
+// Actions (.github/workflows/release.yml runs this); by hand it's:
 //
+//   npm run release                                  (notes from RELEASE_NOTES.md)
 //   npm run release -- "What changed, in one line"
-//   npm run release -- "What changed" --announce     (shows the "update ready" toast)
+//   npm run release -- --announce                    (shows the "update ready" toast)
+//   npm run release -- --build-only                  (just the installer, unsigned)
 //
 // Builds the Windows installer, signs it for the updater with the release key,
 // checks the signature really is the key installed apps trust, and writes
@@ -11,8 +14,9 @@
 // It never asks for a password. The release key's password is empty, and
 // PowerShell can't hold an empty environment variable (setting one to "" deletes
 // it), so `tauri build` stopped to ask — and pressing Enter at that prompt
-// didn't count as empty. So the build runs without the key, and the installer
-// is signed right after with the password passed as an argument.
+// didn't count as empty. So the build runs without the key (and without making
+// updater artifacts), and the installer is signed right after with the password
+// passed as an argument.
 //
 // The key: TAURI_SIGNING_PRIVATE_KEY (the key's text, or a path to it), else
 // src-tauri/prev-player-updater.key, else ~/.tauri/prev-player-updater.key.
@@ -22,15 +26,16 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { releaseNotes } from './release-notes.mjs';
 
 const REPO = 'Arouzefst1/Prev-Player';
 const NSIS_DIR = 'src-tauri/target/release/bundle/nsis';
 const TAURI = 'node_modules/@tauri-apps/cli/tauri.js';
 
 const args = process.argv.slice(2);
-const flags = args.filter(a => a.startsWith('--'));
-// npm on Windows can hand over a quoted sentence as separate words; rejoin them.
-const notes = args.filter(a => !a.startsWith('--')).join(' ');
+const buildOnly = args.includes('--build-only');
+const flags = args.filter(a => a.startsWith('--') && a !== '--build-only');
+const ci = process.env.GITHUB_ACTIONS === 'true';
 
 const fail = msg => { console.error(`\nrelease: ${msg}`); process.exit(1); };
 const step = msg => console.log(`\n=== ${msg}`);
@@ -43,7 +48,11 @@ const cargoVersion = readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^versio
 if (npmVersion !== version || cargoVersion !== version) {
   fail(`versions disagree — tauri.conf.json ${version}, package.json ${npmVersion}, Cargo.toml ${cargoVersion}`);
 }
-if (!notes) fail('say what changed: npm run release -- "What changed, in one line"');
+// npm on Windows can hand over a quoted sentence as separate words; rejoin them.
+const notes = args.filter(a => !a.startsWith('--')).join(' ') || releaseNotes(version)?.summary;
+if (!notes && !buildOnly) {
+  fail(`say what changed: add a "## ${version} — <summary>" section to RELEASE_NOTES.md, or npm run release -- "What changed"`);
+}
 if (!existsSync(TAURI)) fail('the Tauri CLI is missing — run `npm install` first');
 
 // --- The key ----------------------------------------------------------------
@@ -67,11 +76,11 @@ function findKey() {
   return null;
 }
 
-const key = findKey();
-if (!key) fail('no signing key — put prev-player-updater.key in src-tauri\\ (it is git-ignored), or set TAURI_SIGNING_PRIVATE_KEY');
+const key = buildOnly ? null : findKey();
+if (!key && !buildOnly) fail('no signing key — put prev-player-updater.key in src-tauri\\ (it is git-ignored), or set TAURI_SIGNING_PRIVATE_KEY');
 const password = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? '';
 const trusted = keyIdOf(conf.plugins?.updater?.pubkey ?? '');
-if (key.path && existsSync(`${key.path}.pub`)) {
+if (key?.path && existsSync(`${key.path}.pub`)) {
   const id = keyIdOf(readFileSync(`${key.path}.pub`, 'utf8'));
   if (id !== trusted) fail(`${key.path} is key ${id}, but installed apps only trust ${trusted} — wrong key`);
 }
@@ -85,17 +94,21 @@ delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
 // --- Build --------------------------------------------------------------------
 step(`Building PREV Player ${version} (a few minutes)`);
 const started = Date.now();
-const build = spawnSync(process.execPath, [TAURI, 'build', '--bundles', 'nsis'], { stdio: 'inherit', env });
+// For the NSIS installer the updater artifact is the installer itself, signed —
+// which the next step does, so the build is told not to try.
+const noUpdater = JSON.stringify({ bundle: { createUpdaterArtifacts: false } });
+const build = spawnSync(process.execPath, [TAURI, 'build', '--bundles', 'nsis', '--config', noUpdater], { stdio: 'inherit', env });
 const installer = existsSync(NSIS_DIR)
   ? readdirSync(NSIS_DIR).find(f => f.endsWith(`_${version}_x64-setup.exe`))
   : undefined;
 const installerPath = installer && join(NSIS_DIR, installer);
-// Without the key, `tauri build` ends by saying it couldn't sign the updater
-// bundle — expected here, as long as it made a fresh installer first.
-if (!installerPath || statSync(installerPath).mtimeMs < started - 5000) {
+if (build.status !== 0 || !installerPath || statSync(installerPath).mtimeMs < started - 5000) {
   fail(`the build didn't produce a new installer (exit code ${build.status}) — see the errors above`);
 }
-if (build.status !== 0) console.log('\n(That last error is expected: the installer is signed in the next step.)');
+if (buildOnly) {
+  console.log(`\nBuilt ${installerPath} (not signed for the updater).`);
+  process.exit(0);
+}
 
 // --- Sign ---------------------------------------------------------------------
 step('Signing the installer for the updater');
@@ -119,6 +132,10 @@ const manifest = spawnSync(process.execPath, ['scripts/latest-json.mjs', notes, 
 if (manifest.status !== 0) fail('latest.json was not written — see above');
 
 // --- What to do next ------------------------------------------------------------
+if (ci) {
+  console.log(`\nReady: ${installer}, its .sig and latest.json in ${NSIS_DIR}.`);
+  process.exit(0);
+}
 const assetName = installer.replace(/ /g, '.');
 const form = `https://github.com/${REPO}/releases/new?` + new URLSearchParams({
   tag: `v${version}`,
