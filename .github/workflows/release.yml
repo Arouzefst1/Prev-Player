@@ -1,0 +1,149 @@
+# Releases PREV Player by itself. When a version that has no release yet lands
+# on main (the version in src-tauri/tauri.conf.json), this builds the Windows
+# installer, signs it for the updater, and publishes it as the latest release
+# with the notes from RELEASE_NOTES.md, so installed apps pick it up. A push
+# that doesn't change the version finds its release already out and stops in
+# seconds.
+#
+# A pull request gets a test build instead: the same build, with the
+# installer attached to the run and nothing published, so a change that breaks
+# the Windows build is caught before it reaches main. Run by hand from the
+# Actions tab, it releases on main (if the version is new) and test-builds
+# anywhere else.
+#
+# It needs one repository secret, TAURI_SIGNING_PRIVATE_KEY: the text of
+# src-tauri/prev-player-updater.key (Settings → Secrets and variables → Actions).
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      announce:
+        description: Announce it (a minor or major version shows the "update ready" toast instead of updating silently)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# One at a time: a push that lands mid-release waits, then finds the release
+# out. A pull request's test build gives way to the one for its newer commit.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: New version?
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.check.outputs.mode }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "Test build of $version ($GITHUB_REF_NAME); nothing will be published."
+            echo "mode=test" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$(gh release view "v$version" --json isDraft -q .isDraft 2>/dev/null)" = false ]; then
+            echo "v$version is already released; nothing to do."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/release-notes.mjs "$version" > /dev/null
+          if [ "$HAS_KEY" != true ]; then
+            echo "::error::Can't sign $version: add the repository secret TAURI_SIGNING_PRIVATE_KEY (the text of src-tauri/prev-player-updater.key) under Settings → Secrets and variables → Actions, then re-run this."
+            exit 1
+          fi
+          echo "Releasing $version."
+          echo "mode=release" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ needs.check.outputs.mode == 'release' && 'Build, sign and publish' || 'Test build' }} ${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.mode == 'release' || needs.check.outputs.mode == 'test'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check.outputs.version }}
+      NSIS: src-tauri/target/release/bundle/nsis
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # mpv isn't in the repo (~120 MB): every release ships the same build,
+      # taken from the installer of the release before it.
+      - name: Bundle mpv from the last release
+        run: |
+          gh release download --pattern '*_x64-setup.exe' --dir .release/last
+          7z x -y -o.release/unpacked .release/last/*_x64-setup.exe > /dev/null
+          mkdir -p src-tauri/resources
+          cp -r .release/unpacked/resources/mpv src-tauri/resources/
+          ls -l src-tauri/resources/mpv
+          if [ "$(stat -c %s src-tauri/resources/mpv/mpv.exe)" -lt 50000000 ]; then
+            echo "::error::The last release's installer has no usable mpv.exe"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Test build
+        if: needs.check.outputs.mode == 'test'
+        run: node scripts/release.mjs --build-only
+
+      - name: Attach the test installer to this run
+        if: needs.check.outputs.mode == 'test'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prev-player-${{ needs.check.outputs.version }}-test
+          path: ${{ env.NSIS }}/*_x64-setup.exe
+          retention-days: 7
+
+      - name: Build and sign
+        if: needs.check.outputs.mode == 'release'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/release.mjs ${{ inputs.announce && '--announce' || '' }}
+
+      - name: Publish
+        if: needs.check.outputs.mode == 'release'
+        run: |
+          # The names latest.json points at (GitHub would turn the space into a dot anyway).
+          mkdir -p .release/out
+          cp "$NSIS/PREV Player_${VERSION}_x64-setup.exe" ".release/out/PREV.Player_${VERSION}_x64-setup.exe"
+          cp "$NSIS/PREV Player_${VERSION}_x64-setup.exe.sig" ".release/out/PREV.Player_${VERSION}_x64-setup.exe.sig"
+          cp "$NSIS/latest.json" .release/out/
+          node scripts/release-notes.mjs "$VERSION" --body > .release/notes.md
+          # A draft left behind by a run that failed half-way.
+          if [ "$(gh release view "v$VERSION" --json isDraft -q .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "v$VERSION" --yes
+          fi
+          gh release create "v$VERSION" .release/out/* \
+            --target "$GITHUB_SHA" --latest \
+            --title "PREV Player $VERSION — $(node scripts/release-notes.mjs "$VERSION")" \
+            --notes-file .release/notes.md
