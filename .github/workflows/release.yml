@@ -54,6 +54,11 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_REF" != refs/heads/main ]; then
             echo "Test build of $version ($GITHUB_REF_NAME); nothing will be published."
+            if [ "$HAS_KEY" = true ]; then
+              echo "::notice::The signing key secret is set: releases from main will be signed."
+            else
+              echo "::warning::No TAURI_SIGNING_PRIVATE_KEY secret yet (or this run can't see it): releases from main need it."
+            fi
             echo "mode=test" >> "$GITHUB_OUTPUT"
             exit 0
           fi
