@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Trash2, Search, Grid, List, X, ChevronLeft, Share2, Home, ListPlus, Settings } from 'lucide-react';
+import { Play, Trash2, Search, Grid, List, X, ChevronLeft, Share2, Home, ListPlus, Settings, Music } from 'lucide-react';
 import {
   DndContext, closestCenter, PointerSensor, MouseSensor, TouchSensor, useSensor, useSensors,
   useDndContext, DragOverlay, defaultDropAnimationSideEffects,
@@ -9,8 +9,34 @@ import {
   SortableContext, verticalListSortingStrategy, rectSortingStrategy, useSortable, arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore, applyVideoOrder } from '../utils';
+import { VideoMeta, Folder, folderStore, videoOrderStore, folderProgressStore, applyVideoOrder, isUsableThumbnail } from '../utils';
 import { CardBadges } from './FormatBadges';
+import { isAudioPath } from '../formats';
+
+/**
+ * A card's picture: the thumbnail, or — for audio without cover art, a file not
+ * looked at yet, or an image that fails to draw — a tile instead of a broken image.
+ */
+const Thumb: React.FC<{ video: Pick<VideoMeta, 'thumbnail' | 'name' | 'path'>; icon: number; fill?: boolean }> = ({ video, icon, fill }) => {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [video.thumbnail]);
+  const pos = fill ? 'absolute inset-0' : '';
+  if (isUsableThumbnail(video.thumbnail) && !broken) {
+    return <img src={video.thumbnail} alt="" className={`${pos} w-full h-full object-cover`} draggable={false} onError={() => setBroken(true)} />;
+  }
+  if (isAudioPath(video.path || video.name)) {
+    return (
+      <div className={`${pos} w-full h-full flex items-center justify-center bg-gradient-to-br from-red-950/70 via-neutral-900 to-neutral-950`}>
+        <Music size={icon} className="text-red-300/80" />
+      </div>
+    );
+  }
+  return (
+    <div className={`${pos} w-full h-full flex items-center justify-center bg-neutral-800`}>
+      <Play size={icon} className="text-neutral-600" fill="currentColor" />
+    </div>
+  );
+};
 
 // ============================================================
 // Props
@@ -218,13 +244,7 @@ const SortableVideoItem: React.FC<SortableVideoItemProps> = ({
 
         {/* Thumbnail */}
         <div className="relative w-16 h-12 sm:w-20 sm:h-14 flex-shrink-0 rounded overflow-hidden bg-neutral-700">
-          {video.thumbnail ? (
-            <img src={video.thumbnail} alt={video.name} className="w-full h-full object-cover" />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-neutral-800">
-              <Play size={16} className="text-neutral-600" fill="currentColor" />
-            </div>
-          )}
+          <Thumb video={video} icon={16} />
           {video.duration && (
             <div className="absolute bottom-0.5 right-0.5 bg-black/80 px-1 py-0.5 rounded text-[10px] text-white font-semibold">
               {formatTime(video.duration)}
@@ -586,13 +606,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
         <div className="grid grid-cols-2 gap-1 rounded-lg overflow-hidden mb-3 aspect-video bg-neutral-900">
           {thumbs.length > 0 ? thumbs.map((v, i) => (
             <div key={i} className={`bg-neutral-700 overflow-hidden ${thumbs.length === 1 ? 'col-span-2 row-span-2' : thumbs.length === 2 ? 'row-span-2' : ''}`}>
-              {v.thumbnail ? (
-                <img src={v.thumbnail} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center">
-                  <Play size={16} className="text-neutral-600" />
-                </div>
-              )}
+              <Thumb video={v} icon={16} />
             </div>
           )) : (
             <div className="col-span-2 row-span-2 flex items-center justify-center bg-neutral-800">
@@ -645,13 +659,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
       className="group relative rounded-lg overflow-hidden bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-red-600/20"
     >
       <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
-        {video.thumbnail ? (
-          <img src={video.thumbnail} alt={video.name} className="absolute inset-0 w-full h-full object-cover" />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center bg-neutral-800">
-            <Play size={32} className="text-neutral-600" fill="currentColor" />
-          </div>
-        )}
+        <Thumb video={video} icon={32} fill />
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center pointer-events-none">
           <div className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300">
             <Play size={20} className="text-white fill-white" />
@@ -877,11 +885,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                     className="w-full flex items-center gap-3 p-2 rounded-lg hover:bg-neutral-800 transition-colors text-left group"
                   >
                     <div className="w-10 h-7 rounded overflow-hidden bg-neutral-700 flex-shrink-0">
-                      {v.thumbnail ? (
-                        <img src={v.thumbnail} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center"><Play size={10} className="text-neutral-600" /></div>
-                      )}
+                      <Thumb video={v} icon={10} />
                     </div>
                     <span className="text-sm text-neutral-300 truncate flex-1 group-hover:text-white">{v.name}</span>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-neutral-600 group-hover:text-red-400 flex-shrink-0">
@@ -914,13 +918,7 @@ const VideoLibrary: React.FC<VideoLibraryProps> = ({
                   className="group relative rounded-lg overflow-hidden bg-neutral-800 hover:bg-neutral-700 transition-all duration-300 cursor-pointer hover:scale-105 hover:shadow-lg hover:shadow-red-600/20"
                 >
                   <div className="relative w-full pt-[56.25%] bg-gradient-to-br from-neutral-700 to-neutral-900 overflow-hidden">
-                    {video.thumbnail ? (
-                      <img src={video.thumbnail} alt={video.name} className="absolute inset-0 w-full h-full object-cover" />
-                    ) : (
-                      <div className="absolute inset-0 flex items-center justify-center bg-neutral-800">
-                        <Play size={32} className="text-neutral-600" fill="currentColor" />
-                      </div>
-                    )}
+                    <Thumb video={video} icon={32} fill />
                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center pointer-events-none">
                       <div className="bg-red-600 p-3 rounded-full transform scale-0 group-hover:scale-100 transition-transform duration-300">
                         <Play size={20} className="text-white fill-white" />
