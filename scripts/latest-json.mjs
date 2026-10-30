@@ -19,7 +19,8 @@ const NSIS_DIR = 'src-tauri/target/release/bundle/nsis';
 
 const args = process.argv.slice(2);
 const announce = args.includes('--announce');
-const notes = args.find(a => !a.startsWith('--')) ?? '';
+// npm on Windows can hand over a quoted sentence as separate words; rejoin them.
+const notes = args.filter(a => !a.startsWith('--')).join(' ');
 
 const fail = msg => { console.error(`latest-json: ${msg}`); process.exit(1); };
 

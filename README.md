@@ -91,26 +91,25 @@ cd engine && cargo test --workspace     # 110 tests
 ## Releasing
 
 Bump the version in **three** files — `package.json`, `src-tauri/tauri.conf.json`
-and `src-tauri/Cargo.toml` — then:
+and `src-tauri/Cargo.toml` — then, with the signing key at
+`src-tauri/prev-player-updater.key` (git-ignored, never committed):
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat <path-to>/prev-player-updater.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-npx tauri build --bundles nsis
+npm run release -- "What changed, in one line"
 ```
 
-That produces the installer and its `.sig` under
-`src-tauri/target/release/bundle/nsis/`. Tauri doesn't emit the updater manifest,
-so generate it next to them:
+That builds the installer, signs it for the updater, checks the signature is
+the key installed apps trust (and refuses to go on with any other), writes
+`latest.json` marked `"silent": true`, and prints a link to a pre-filled GitHub
+release form. Publish the installer, its `.sig` and `latest.json` on a release
+tagged `v<version>`, marked **latest** (not a draft or pre-release — the updater
+only reads `releases/latest`).
 
-```bash
-npm run release:manifest -- "What changed, in one line"
-```
-
-It checks the three versions agree, takes the signature from the `.sig`, and
-marks the release `"silent": true`. Publish the installer, its `.sig` and
-`latest.json` on a GitHub release tagged `v<version>`, marked **latest** (not a
-draft or pre-release — the updater only reads `releases/latest`).
+It never asks for a password: the key's password is empty, and PowerShell can't
+hold an empty environment variable, so the build runs without the key and the
+installer is signed right after. A key kept elsewhere can be given as
+`TAURI_SIGNING_PRIVATE_KEY` (its text or path), with
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if it has a password.
 
 A silent release reaches every install on 1.5.2 or newer without anyone doing
 anything: it downloads in the background, installs when the user closes the
@@ -121,8 +120,9 @@ way). Installs older than 1.5.2 apply
 it the way their own build does (1.3.2–1.5.1: installs and relaunches at
 launch; 1.3.1 and earlier: a dialog).
 
-The **private signing key lives outside this repository and must stay there.**
-Only the signature and the public key (in `tauri.conf.json`) are ever published.
+The **private signing key is never committed** — `.gitignore` blocks every
+`*.key` and `*.key.pub`, so it can sit in `src-tauri/` on the release PC. Only
+the signature and the public key (in `tauri.conf.json`) are ever published.
 
 The updater only moves forward and the identifier is unchanged
 (`com.prev-player.app`), so a release from here upgrades every existing install.

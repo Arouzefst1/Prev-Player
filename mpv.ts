@@ -11,7 +11,7 @@
 // ===========================================================================
 
 import {
-  init, destroy, command, setProperty, getProperty, observeProperties,
+  init, destroy, command, setProperty, getProperty, listenEvents,
   type MpvConfig,
 } from 'tauri-plugin-mpv-api';
 import { dynamicMetadataOf, type RawMedia } from './media';
@@ -101,6 +101,51 @@ let passthrough = false;
 let _dw = 0; let _dh = 0;
 
 let initialized = false;
+
+// ---------------------------------------------------------------------------
+// Switching files.
+//
+// `loadfile` answers as soon as mpv has queued the file, not when it has opened
+// it: for a moment after, mpv is still playing — and reporting the time,
+// duration and end-of-file of — the file before. Taken for the new file's, that
+// saved one video's position under another's id, so the other then opened past
+// its own end on a black screen. So a load is followed to its own `start-file`
+// (until then, file-specific reports are the old file's and are dropped), and
+// mpvLoad resolves only at `file-loaded` — or fails with mpv's reason at an
+// `end-file` error.
+// ---------------------------------------------------------------------------
+
+interface PendingLoad {
+  gen: number;
+  /** mpv's playlist entry for this load, once loadfile has answered. */
+  entry?: number;
+  /** This load's file has started; reports from now on are its own. */
+  started: boolean;
+  settle: (error?: string) => void;
+}
+let pending: PendingLoad | null = null;
+let loadGen = 0;
+
+/** Properties of the player rather than of a file — never stale. */
+const PLAYER_PROPS = new Set(['pause', 'volume', 'mute', 'speed', 'current-ao', 'audio-device-list']);
+
+function onLifecycle(ev: { event?: string; reason?: string; file_error?: string; playlist_entry_id?: number }): void {
+  const p = pending;
+  if (!p) return;
+  const entry = typeof ev.playlist_entry_id === 'number' ? ev.playlist_entry_id : undefined;
+  const ours = p.entry === undefined || entry === undefined || entry === p.entry;
+  switch (ev.event) {
+    case 'start-file':
+      if (ours) p.started = true;
+      break;
+    case 'file-loaded':
+      if (p.started) p.settle();
+      break;
+    case 'end-file':
+      if (p.started && ours && ev.reason === 'error') p.settle(ev.file_error || 'mpv could not open it');
+      break;
+  }
+}
 let initPromise: Promise<boolean> | null = null;
 let unlisten: (() => void) | null = null;
 
@@ -311,7 +356,11 @@ export function initMpv(mpvPath?: string): Promise<boolean> {
     initialized = true;
     recordCapabilities();
 
-    unlisten = await observeProperties(OBSERVED, ({ name, data }) => {
+    unlisten = await listenEvents((ev: any) => {
+      if (ev.event !== 'property-change') { onLifecycle(ev); return; }
+      const { name, data } = ev as { name: string; data: any };
+      // Between loadfile and its start-file, file reports are the old file's.
+      if (pending && !pending.started && !PLAYER_PROPS.has(name)) return;
       switch (name) {
         case 'pause':        state.paused = !!data; break;
         case 'time-pos':     if (typeof data === 'number') state.currentTime = data; break;
@@ -426,14 +475,41 @@ async function urlFor(path: string, disc?: DiscSource): Promise<string> {
   return disc.playlist !== undefined ? `bd://mpls/${disc.playlist}` : 'bd://';
 }
 
+/** How long a file may take to open (a slow network stream) before playback is let go ahead regardless. */
+const OPEN_TIMEOUT_MS = 15000;
+
+/**
+ * Open `path` and play it from `startSeconds`. Resolves once mpv really has the
+ * file open (see "Switching files" above); rejects with mpv's reason if it
+ * can't open it.
+ */
 export async function mpvLoad(path: string, startSeconds = 0, disc?: DiscSource): Promise<void> {
   cancelAudioRecovery();
+  // What the screen shows is the new file from this moment: its start, no
+  // length yet, nothing of the previous one's time or ending.
   state.ended = false;
+  state.currentTime = Math.max(0, startSeconds);
+  state.duration = 0;
+  state.filename = undefined;
   state.tracks = []; state.audioId = null; state.subId = null; state.secondarySubId = null;
   state.videoAspect = null; _dw = 0; _dh = 0;
   state.media = {}; state.chapters = [];
   if (dynamicProbe) { clearTimeout(dynamicProbe); dynamicProbe = null; }
+  emit();
   if (!(await ready())) throw new Error('mpv engine is not running');
+
+  pending?.settle(); // a newer load supersedes one still opening
+  const gen = ++loadGen;
+  let settle!: (error?: string) => void;
+  const opened = new Promise<void>((resolve, reject) => {
+    settle = (error) => {
+      if (pending?.gen === gen) pending = null;
+      if (error) reject(new Error(error)); else resolve();
+    };
+  });
+  opened.catch(() => {}); // observed below; never an unhandled rejection
+  pending = { gen, started: false, settle };
+
   // Resume: start the file AT the saved position via a file-local option, so mpv
   // applies it as it opens the file. Unlike a seek fired after load, this can never
   // be dropped. mpv >= 0.38 loadfile syntax: loadfile <url> <flags> <index> <options>.
@@ -444,8 +520,19 @@ export async function mpvLoad(path: string, startSeconds = 0, disc?: DiscSource)
     ? [url, 'replace', 0, `start=${startSeconds.toFixed(3)}`]
     : [url];
   // Retry: loading a network stream (or a cold engine) can transiently fail.
-  await retry(() => command('loadfile', loadArgs) as Promise<unknown>, 3, 250);
+  let reply: any;
+  try {
+    reply = await retry(() => command('loadfile', loadArgs) as Promise<unknown>, 3, 250);
+  } catch (e) {
+    if (pending?.gen === gen) pending = null;
+    throw e;
+  }
+  if (pending?.gen === gen && typeof reply?.playlist_entry_id === 'number') pending.entry = reply.playlist_entry_id;
   await setProperty('pause', false);
+  const timedOut = new Promise<void>(r => setTimeout(r, OPEN_TIMEOUT_MS));
+  await Promise.race([opened, timedOut]);
+  // Still opening after the timeout (a slow stream): stop holding its reports back.
+  if (pending?.gen === gen) { pending.started = true; pending = null; }
 }
 
 /** Toggle subtitle visibility (for the "c" shortcut). */
@@ -597,9 +684,10 @@ export async function mpvTogglePause(): Promise<void> {
 }
 
 /** Seek to an absolute time (seconds). */
-export async function mpvSeekAbsolute(seconds: number): Promise<void> {
+/** Seek to `seconds` exactly, or with `exact` false to the nearest keyframe (fast, for scrubbing). */
+export async function mpvSeekAbsolute(seconds: number, exact = true): Promise<void> {
   if (!(await ready())) return;
-  await command('seek', [seconds, 'absolute', 'exact']);
+  await command('seek', [seconds, exact ? 'absolute+exact' : 'absolute+keyframes']);
 }
 
 /** Seek by a delta (seconds, +/-). */

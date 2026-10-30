@@ -22,9 +22,12 @@ interface PlayerControlsProps {
   /** A queue exists, so the loop button offers all three modes. */
   hasQueueToLoop?: boolean;
   onPlayPause: () => void;
-  onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onSeekStart: () => void;
-  onSeekEnd: (e: React.MouseEvent<HTMLInputElement> | React.TouchEvent<HTMLInputElement>) => void;
+  /** A drag on the seek bar began. */
+  onScrubStart: () => void;
+  /** The drag is at `time` — a quick (keyframe) seek is fine. */
+  onScrub: (time: number) => void;
+  /** Let go (or a click) at `time` — land exactly there. */
+  onScrubEnd: (time: number) => void;
   onVolumeChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onToggleMute: () => void;
   onToggleFullscreen: () => void;
@@ -73,9 +76,9 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   loopMode,
   hasQueueToLoop,
   onPlayPause,
-  onSeek,
-  onSeekStart,
-  onSeekEnd,
+  onScrubStart,
+  onScrub,
+  onScrubEnd,
   onVolumeChange,
   onToggleMute,
   onToggleFullscreen,
@@ -106,33 +109,77 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   const [settingsView, setSettingsView] = useState<null | 'menu' | 'speed'>(null);
   const showSettings = settingsView !== null;
   const settingsRef = useRef<HTMLDivElement>(null);
-  const progressPercent = duration ? (currentTime / duration) * 100 : 0;
 
-  // Seek-bar preview: where the pointer is over the bar, and whether the thumb
-  // is being dragged (then the preview follows the thumb, even off the bar).
+  // The seek bar follows the pointer itself, not the player: while hovering or
+  // dragging, the fill, the dot, the preview card, the line joining them and the
+  // time all come from where the pointer is, in the same frame. (Driving them
+  // from the player's time made each move wait for a seek and a re-render of the
+  // whole player, so they trailed the cursor.) Pointer capture keeps a drag going
+  // when the pointer wanders off the bar.
   const barRef = useRef<HTMLDivElement>(null);
+  const [barWidth, setBarWidth] = useState(0);
   const [hoverX, setHoverX] = useState<number | null>(null);
-  const [scrubbing, setScrubbing] = useState(false);
-  const trackHover = (clientX: number) => {
-    const r = barRef.current?.getBoundingClientRect();
-    if (r && r.width > 0) setHoverX(Math.max(0, Math.min(r.width, clientX - r.left)));
-  };
-  useEffect(() => {
-    if (!scrubbing) return;
-    const end = () => setScrubbing(false);
-    window.addEventListener('mouseup', end);
-    window.addEventListener('touchend', end);
-    return () => { window.removeEventListener('mouseup', end); window.removeEventListener('touchend', end); };
-  }, [scrubbing]);
-  // The controls fading out mid-hover would leave a card floating over the video.
-  useEffect(() => { if (!visible) { setHoverX(null); setScrubbing(false); } }, [visible]);
+  /** Where a drag is, in px from the bar's left; null when not dragging. */
+  const [scrubX, setScrubX] = useState<number | null>(null);
+  const scrubRef = useRef<number | null>(null);
+  const frame = useRef(0);
+  const pendingX = useRef<number | null>(null);
 
-  const barWidth = barRef.current?.offsetWidth ?? 0;
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setBarWidth(el.offsetWidth));
+    ro.observe(el);
+    setBarWidth(el.offsetWidth);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+
+  const xOf = (clientX: number) => {
+    const r = barRef.current?.getBoundingClientRect();
+    return r && r.width > 0 ? Math.max(0, Math.min(r.width, clientX - r.left)) : 0;
+  };
+  const timeOf = (x: number) => (barWidth > 0 && duration ? (x / barWidth) * duration : 0);
+
+  /** One state update per frame, however fast the pointer reports. */
+  const follow = (x: number) => {
+    pendingX.current = x;
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const px = pendingX.current;
+      if (px === null) return;
+      setHoverX(px);
+      if (scrubRef.current !== null) {
+        scrubRef.current = px;
+        setScrubX(px);
+        onScrub(timeOf(px));
+      }
+    });
+  };
+
+  const endScrub = (x: number) => {
+    if (scrubRef.current === null) return;
+    scrubRef.current = null;
+    setScrubX(null);
+    onScrubEnd(timeOf(x));
+  };
+
+  // The controls fading out mid-hover would leave a card floating over the video.
+  useEffect(() => {
+    if (visible) return;
+    setHoverX(null);
+    if (scrubRef.current !== null) endScrub(scrubRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  const scrubbing = scrubX !== null;
+  const shownTime = scrubbing ? timeOf(scrubX!) : currentTime;
+  const progressPercent = duration ? Math.min(100, (shownTime / duration) * 100) : 0;
   const preview = (() => {
-    if (!duration || barWidth <= 0) return null;
-    const x = scrubbing ? (currentTime / duration) * barWidth : hoverX;
-    if (x === null) return null;
-    const time = scrubbing ? currentTime : (x / barWidth) * duration;
+    const x = scrubX ?? hoverX;
+    if (!duration || barWidth <= 0 || x === null) return null;
+    const time = timeOf(x);
     const half = previewPath ? PREVIEW_WIDTH / 2 : 36;
     const chapter = chapters?.reduce<string | undefined>((found, c) => (c.time <= time ? c.title ?? found : found), undefined);
     return { time, chapter, left: Math.max(half, Math.min(barWidth - half, x)), x };
@@ -154,7 +201,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
   };
 
   const getRemainingTime = (): number => {
-    return Math.max(0, duration - currentTime);
+    return Math.max(0, duration - shownTime);
   };
 
   // Close settings when clicking outside
@@ -183,9 +230,27 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
       {/* Progress Bar Container */}
       <div
         ref={barRef}
-        className="relative group w-full h-2 sm:h-4 mb-1.5 sm:mb-2 cursor-pointer flex items-center"
-        onMouseMove={(e) => trackHover(e.clientX)}
-        onMouseLeave={() => setHoverX(null)}
+        role="slider"
+        aria-label="Seek"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(duration || 0)}
+        aria-valuenow={Math.round(shownTime)}
+        className="relative group w-full h-2 sm:h-4 mb-1.5 sm:mb-2 cursor-pointer flex items-center touch-none select-none"
+        onPointerDown={(e) => {
+          if (e.button !== 0 || !duration) return;
+          e.preventDefault();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          const x = xOf(e.clientX);
+          scrubRef.current = x;
+          setScrubX(x);
+          setHoverX(x);
+          onScrubStart();
+          onScrub(timeOf(x));
+        }}
+        onPointerMove={(e) => follow(xOf(e.clientX))}
+        onPointerUp={(e) => endScrub(xOf(e.clientX))}
+        onPointerCancel={() => { if (scrubRef.current !== null) endScrub(scrubRef.current); }}
+        onPointerLeave={() => { if (scrubRef.current === null) { pendingX.current = null; setHoverX(null); } }}
       >
         {preview && (
           <SeekPreview
@@ -197,6 +262,13 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             aspect={videoAspect ?? 16 / 9}
           />
         )}
+        {/* The line joining the card to the exact spot on the bar. */}
+        {preview && (
+          <div
+            className="pointer-events-none absolute bottom-1/2 w-[2px] -translate-x-1/2 rounded-full bg-gradient-to-b from-white/70 to-white/30 z-20"
+            style={{ left: preview.x, height: 'calc(50% + 12px)' }}
+          />
+        )}
 
         {/* Track Background */}
         <div className="absolute w-full h-1 group-hover:h-1.5 transition-[height] duration-150 bg-white/30 rounded-full overflow-hidden">
@@ -204,37 +276,28 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
             {preview && !scrubbing && (
               <div className="absolute inset-y-0 left-0 bg-white/35" style={{ width: preview.x }} />
             )}
-             {/* Buffered/Progress Bar */}
-            <div 
+             {/* Played */}
+            <div
                 className="h-full bg-red-600 relative"
                 style={{ width: `${progressPercent}%` }}
-            >
-                {/* Glow effect at the tip */}
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1.5 sm:w-2 h-1.5 sm:h-2 bg-red-600 rounded-full shadow-[0_0_10px_rgba(220,38,38,0.8)] opacity-0 group-hover:opacity-100 transition-opacity"></div>
-            </div>
+            />
             {/* Chapter breaks */}
             {duration > 0 && chapters?.map(c => c.time > 0.5 && c.time < duration - 0.5 && (
               <div key={c.time} className="absolute inset-y-0 w-[3px] -ml-[1.5px] bg-black/70" style={{ left: `${(c.time / duration) * 100}%` }} />
             ))}
         </div>
-        
-        {/* Invisible Range Input for Interaction */}
-        <input
-          type="range"
-          min="0"
-          max={duration || 100}
-          value={currentTime}
-          onChange={onSeek}
-          onMouseDown={() => { setScrubbing(true); onSeekStart(); }}
-          onTouchStart={(e) => { setScrubbing(true); trackHover(e.touches[0].clientX); onSeekStart(); }}
-          onMouseUp={onSeekEnd}
-          onTouchEnd={onSeekEnd}
-          className="absolute w-full h-full opacity-0 cursor-pointer z-10"
-        />
-        
-        {/* Thumb (Only visible on hover or drag) */}
-        <div 
-            className={`pointer-events-none absolute h-2 sm:h-3 w-2 sm:w-3 bg-red-600 rounded-full shadow-md top-1/2 -translate-y-1/2 -ml-1 sm:-ml-1.5 transition-all duration-100 group-hover:scale-100 ${scrubbing ? 'scale-125' : 'scale-0'}`}
+
+        {/* Hover dot: where a click would land */}
+        {preview && !scrubbing && (
+          <div
+            className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full bg-white shadow-[0_0_6px_rgba(0,0,0,0.6)] z-20"
+            style={{ left: preview.x }}
+          />
+        )}
+
+        {/* Thumb: the playhead (follows the pointer exactly while dragging — no easing) */}
+        <div
+            className={`pointer-events-none absolute h-2 sm:h-3 w-2 sm:w-3 bg-red-600 rounded-full shadow-[0_0_10px_rgba(220,38,38,0.8)] top-1/2 -translate-y-1/2 -ml-1 sm:-ml-1.5 transition-transform duration-100 group-hover:scale-100 ${scrubbing ? 'scale-150' : 'scale-0'}`}
             style={{ left: `${progressPercent}%` }}
         />
       </div>
@@ -364,7 +427,7 @@ const PlayerControls: React.FC<PlayerControlsProps> = ({
               </span>
             ) : (
               <span className="flex items-center gap-1">
-                {formatTime(currentTime)} <span className="text-neutral-400">/</span> {formatTime(duration)}
+                {formatTime(shownTime)} <span className="text-neutral-400">/</span> {formatTime(duration)}
               </span>
             )}
           </button>

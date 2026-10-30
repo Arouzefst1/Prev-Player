@@ -203,6 +203,14 @@ export interface StoredVideo {
   disc?: 'bluray' | 'dvd';
 }
 
+/**
+ * A thumbnail that will actually draw: an image data URL with something in it.
+ * ("data:," is what a canvas gives for a file with no picture.)
+ */
+export function isUsableThumbnail(t: string | undefined | null): t is string {
+  return !!t && /^data:image\/(jpeg|png|webp)/.test(t) && t.length > 200;
+}
+
 /** Metadata exposed to the UI */
 export interface VideoMeta {
   id: string;
@@ -367,6 +375,13 @@ export function clearVideoProgress(videoId: string): void {
   if (!videoId) return;
   const map = readProgressMap();
   if (map[videoId]) { delete map[videoId]; writeProgressMap(map); }
+}
+
+/** The stored position and the length of the file it was saved from. */
+export function loadVideoProgressEntry(videoId: string): { time: number; duration: number } | null {
+  if (!videoId) return null;
+  const entry = readProgressMap()[videoId];
+  return entry ? { time: entry.time, duration: entry.duration } : null;
 }
 
 export function loadVideoProgress(videoId: string): number | null {
