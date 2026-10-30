@@ -1,6 +1,6 @@
 ﻿import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
-import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight, RefreshCw, Share2, Settings } from 'lucide-react';
+import { Upload, FileVideo, AlertCircle, Library, FolderPlus, ChevronRight, RefreshCw, Share2, Settings, Music } from 'lucide-react';
 import { isTypingTarget } from './utils';
 import VideoPlayer from './components/VideoPlayer';
 import VideoLibrary from './components/VideoLibrary';
@@ -20,6 +20,7 @@ import {
   srtToVtt,
   extractVideoThumbnail,
   getVideoDuration,
+  isUsableThumbnail,
   videoStore,
   VideoMeta,
   videoOrderStore,
@@ -147,6 +148,8 @@ function App() {
   // without depending on (and re-creating themselves for) every library change.
   const videoLibraryRef = useRef<VideoMeta[]>([]);
   useEffect(() => { videoLibraryRef.current = videoLibrary; }, [videoLibrary]);
+  /** The library has been read from storage; from then on `videoLibraryRef` is the whole of it. */
+  const libraryLoadedRef = useRef(false);
 
   // Merge freshly-added metas into the library and float every "touched" id
   // (newly added OR re-selected existing) to the very top — #1 first-selected.
@@ -460,8 +463,10 @@ function App() {
       let metas: VideoMeta[] = [];
       try {
         metas = applyVideoOrder(await videoStore.getAllMeta(), videoOrderStore.getOrder());
+        videoLibraryRef.current = metas;
         setVideoLibrary(metas);
       } catch {}
+      libraryLoadedRef.current = true;
 
       // Backfill real file sizes for older entries saved with size 0. `stat` reads
       // only the file's metadata (the size), so this never copies the file or uses
@@ -486,7 +491,9 @@ function App() {
 
       // Entries added before the frame engine (or whose probe never ran) get a
       // real thumbnail, length and format now — quietly, one at a time.
-      const unprobed = metas.filter(m => !m.probed && !/^https?:/i.test(m.path));
+      // So do entries whose thumbnail never rendered (an audio file once came out
+      // as an empty "data:," image).
+      const unprobed = metas.filter(m => (!m.probed || (m.thumbnail && !isUsableThumbnail(m.thumbnail))) && !m.disc && !/^https?:/i.test(m.path));
       if (unprobed.length > 0) enqueueMetaExtraction(unprobed.map(m => ({ path: m.path, id: m.id })), true);
 
       // Restore last-played video reference
@@ -579,10 +586,13 @@ function App() {
   const metaQueueRef = useRef<Promise<void>>(Promise.resolve());
   const metaPendingRef = useRef(0);
 
-  const enqueueMetaExtraction = useCallback((items: { path: string; id: string }[], gentle = false) => {
+  const enqueueMetaExtraction = useCallback((items: { path: string; id: string }[], gentle = false, delayMs = 0) => {
     if (items.length === 0) return;
     metaPendingRef.current += items.length;
     metaQueueRef.current = metaQueueRef.current.then(async () => {
+      // A file that was just opened to watch is looked at after it has started
+      // playing, so the two never compete for the disk and the decoder.
+      if (delayMs) await new Promise(r => setTimeout(r, delayMs));
       const { convertFileSrc } = await import('@tauri-apps/api/core');
       const { stat } = await import('@tauri-apps/plugin-fs');
       for (const { path, id } of items) {
@@ -596,15 +606,19 @@ function App() {
           duration = p.duration;
           media = frames.mediaOfProbe(p);
         } catch {
+          // The WebView can't draw a picture from audio, so audio gets no thumbnail
+          // here (the library shows a music tile) — only its length.
           const fileUrl = convertFileSrc(path);
-          try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {}
+          if (!isAudioPath(path)) { try { thumbnail = await extractVideoThumbnail(fileUrl); } catch {} }
           try { duration = await getVideoDuration(fileUrl); } catch {}
         }
+        if (thumbnail && !isUsableThumbnail(thumbnail)) thumbnail = undefined;
         // Real file size straight from the file-system metadata — reads the size
         // only, never the bytes, so it does NOT copy the file / use extra storage.
         try { size = (await stat(path)).size; } catch {}
         const patch = {
-          ...(thumbnail ? { thumbnail } : {}),
+          // Empty clears an unusable stored thumbnail; the library then draws its placeholder.
+          thumbnail: thumbnail ?? '',
           ...(duration !== undefined ? { duration } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(media ? { media } : {}),
@@ -658,8 +672,10 @@ function App() {
 
     const { convertFileSrc } = await import('@tauri-apps/api/core');
 
-    // Deduplicate against existing library (by path)
-    const allMetas = await videoStore.getAllMeta();
+    // Deduplicate against existing library (by path). Once loaded, the library
+    // is in memory — reading it back from storage (every thumbnail included)
+    // only held up playback.
+    const allMetas = libraryLoadedRef.current ? videoLibraryRef.current : await videoStore.getAllMeta();
     const byPath = new Map(allMetas.map(m => [m.path, m]));
     const seenInBatch = new Map<string, string>(); // path -> id
 
@@ -706,8 +722,8 @@ function App() {
           await videoStore.save({ id: meta.id, name: meta.name, path: meta.path, size: 0, addedAt: meta.addedAt, type: meta.type, disc: meta.disc, probed: meta.probed });
         } catch {}
       }
-      // Background: extract thumbnail + duration
-      enqueueMetaExtraction(newMetas.filter(m => !m.disc).map(m => ({ path: m.path, id: m.id })));
+      // Background: extract thumbnail + duration, once the video is playing.
+      enqueueMetaExtraction(newMetas.filter(m => !m.disc).map(m => ({ path: m.path, id: m.id })), false, 3000);
     }
 
     // Show new videos AND bubble every selected file (new or already-owned) to the
@@ -1865,8 +1881,12 @@ function App() {
                   className="w-full group flex items-center gap-4 p-3 rounded-2xl bg-neutral-800/60 ring-1 ring-white/5 hover:bg-neutral-800 hover:ring-red-500/30 transition-all duration-300"
                 >
                   <div className="relative w-28 h-[68px] flex-shrink-0 rounded-xl overflow-hidden bg-neutral-700">
-                    {lastVideo.thumbnail ? (
+                    {isUsableThumbnail(lastVideo.thumbnail) ? (
                       <img src={lastVideo.thumbnail} alt={lastVideo.name} className="w-full h-full object-cover" />
+                    ) : isAudioPath(lastVideo.path || lastVideo.name) ? (
+                      <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-red-950/70 via-neutral-900 to-neutral-950">
+                        <Music size={18} className="text-red-300/80" />
+                      </div>
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-neutral-800">
                         <FileVideo size={18} className="text-neutral-600" />

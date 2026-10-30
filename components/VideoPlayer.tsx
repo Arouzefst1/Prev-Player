@@ -15,7 +15,7 @@ import { useTrackHelpers } from './useTrackHelpers';
 import { useDisplayMatch } from './useDisplayMatch';
 import PipOverlay from './PipOverlay';
 import { nextLoopMode, type LoopMode } from './LoopButton';
-import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, clearVideoProgress, isTypingTarget } from '../utils';
+import { OverlayState, srtToVtt, detectCodecSupport, saveVideoProgress, loadVideoProgress, loadVideoProgressEntry, clearVideoProgress, isTypingTarget, isUsableThumbnail } from '../utils';
 import {
   enterPipWindow, exitPipWindow, reshapePipWindow, resolveAspect, activeMonitor,
   savePipPrefs, pipMinSize, pipMaxSize, fitToAspect, snapPosition,
@@ -199,7 +199,7 @@ const SortableQueueItem: React.FC<{
       <span className={`text-xs font-mono w-5 text-right flex-shrink-0 ${isCurrent ? 'text-red-400 font-bold' : 'text-neutral-600'}`}>
         {isCurrent ? '▶' : index + 1}
       </span>
-      {item.thumbnail && (
+      {isUsableThumbnail(item.thumbnail) && (
         <div className="w-12 h-8 rounded overflow-hidden flex-shrink-0 bg-neutral-800">
           <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
         </div>
@@ -475,7 +475,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // open it in the frame engine, and fill in every second where that's cheap.
   useEffect(() => {
     if (!previewPath) return;
-    const t = setTimeout(() => prefetchPreviews(previewPath), 1200);
+    const t = setTimeout(() => prefetchPreviews(previewPath), 2500);
     return () => clearTimeout(t);
   }, [previewPath]);
 
@@ -815,13 +815,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       // (Skipped for a playlist resume: that position was just written against
       // this very file, so there's nothing to self-heal — and the repair clears
       // the continue-watching entry, which isn't ours to throw away here.)
+      // mpvLoad now returns only once the file is really open, so this is the
+      // new file's length — it used to be read a beat early and come back as the
+      // previous file's, which let a position from a longer video through.
       if (startSeconds > 0 && !usingOverride) {
         const realDuration = await mpvGetDuration();
         if (cancelled) return;
-        if (realDuration > 0 && startSeconds >= realDuration - 10) {
+        // A position saved from a file of another length was never this one's.
+        const savedFrom = videoId ? loadVideoProgressEntry(videoId)?.duration ?? 0 : 0;
+        const foreign = savedFrom > 0 && realDuration > 0 && Math.abs(savedFrom - realDuration) > 2;
+        if (realDuration > 0 && (foreign || startSeconds >= realDuration - 10)) {
           console.warn(`[resume] stored position ${startSeconds.toFixed(1)}s doesn't fit this file (${realDuration.toFixed(1)}s) — restarting from 0`);
           if (videoId) clearVideoProgress(videoId);
           await mpvSeekAbsolute(0).catch(() => {});
+          // Opened past its end, mpv may have stopped there (keep-open): play on.
+          await mpvSetPaused(false).catch(() => {});
           setCurrentTime(0);
           startSeconds = 0;
         }
@@ -1611,24 +1619,41 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // --- Handlers for Control Bar ---
   
-  const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const time = parseFloat(e.target.value);
-    setCurrentTime(time);
-    if (videoRef.current) {
-        videoRef.current.currentTime = time; 
-    }
-  };
-
   const handleSeekStart = () => {
     setIsDragging(true);
   };
 
-  const handleSeekEnd = (e: React.MouseEvent | React.TouchEvent) => {
+  // Seek-bar drags (PlayerControls draws the bar from the pointer; this moves
+  // the video). While dragging: keyframe seeks — quick, so the picture keeps
+  // up — one at a time, the newest position winning. On release: the exact spot.
+  const scrubSeekRef = useRef({ busy: false, next: null as number | null });
+  const handleScrubStart = useCallback(() => setIsDragging(true), []);
+  const handleScrub = useCallback((time: number) => {
+    const q = scrubSeekRef.current;
+    q.next = time;
+    if (q.busy) return;
+    q.busy = true;
+    (async () => {
+      while (q.next !== null) {
+        const t = q.next;
+        q.next = null;
+        await mpvSeekAbsolute(t, false).catch(() => {});
+      }
+      q.busy = false;
+    })();
+  }, []);
+  const handleScrubEnd = useCallback((time: number) => {
+    const q = scrubSeekRef.current;
+    q.next = null;
+    setCurrentTime(time);
     setIsDragging(false);
-    // CRITICAL FIX: Blur the input and focus the container to ensure Spacebar toggles play instead of interacting with the slider
-    (e.target as HTMLInputElement).blur();
+    (async () => {
+      while (q.busy) await new Promise(r => setTimeout(r, 10));
+      await mpvSeekAbsolute(time, true).catch(() => {});
+    })();
     containerRef.current?.focus();
-  };
+  }, []);
+
 
   return (
     <div
@@ -1803,9 +1828,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         loopMode={loopMode}
         hasQueueToLoop={hasQueue}
         onPlayPause={togglePlay}
-        onSeek={handleSeekChange}
-        onSeekStart={handleSeekStart}
-        onSeekEnd={handleSeekEnd}
+        onScrubStart={handleScrubStart}
+        onScrub={handleScrub}
+        onScrubEnd={handleScrubEnd}
         onVolumeChange={(e) => handleVolumeChange(parseFloat(e.target.value), false)}
         onToggleMute={() => {
             if (videoRef.current) {
