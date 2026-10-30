@@ -117,9 +117,18 @@ jobs:
 
       - run: npm ci
 
+      # With the key at hand (not on a fork's pull request), it signs too, which
+      # checks the secret is the key installed apps trust before a release needs it.
       - name: Test build
         if: needs.check.outputs.mode == 'test'
-        run: node scripts/release.mjs --build-only
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            node scripts/release.mjs "Test build"
+          else
+            node scripts/release.mjs --build-only
+          fi
 
       - name: Attach the test installer to this run
         if: needs.check.outputs.mode == 'test'
