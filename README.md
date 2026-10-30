@@ -90,20 +90,45 @@ cd engine && cargo test --workspace     # 110 tests
 
 ## Releasing
 
-Bump the version in **three** files — `package.json`, `src-tauri/tauri.conf.json`
-and `src-tauri/Cargo.toml` — then, with the signing key at
-`src-tauri/prev-player-updater.key` (git-ignored, never committed):
+Releases go out by themselves. Bump the version in **three** files —
+`package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` — and
+add a section for it at the top of [RELEASE_NOTES.md](RELEASE_NOTES.md):
+
+```md
+## 1.6.2 — one line on what changed
+
+What's new, for the release page.
+```
+
+When that lands on `main`, the **Release** workflow (`.github/workflows/release.yml`)
+builds the installer on a Windows runner, bundles the same mpv the last release
+shipped, signs it for the updater, checks the signature is the key installed
+apps trust (and refuses to go on with any other), and publishes the installer,
+its `.sig` and `latest.json` as the latest release, tagged `v<version>`. A push
+that doesn't change the version does nothing. Every pull request gets a test
+build instead: the same build, nothing published, with the installer attached
+to the run to try out. Run the workflow by hand from the Actions tab to retry a
+release or to announce one (see below).
+
+It needs one repository secret, set once: **`TAURI_SIGNING_PRIVATE_KEY`**, the
+text of `src-tauri/prev-player-updater.key` (Settings → Secrets and variables →
+Actions → New repository secret).
+
+### By hand
+
+With the signing key at `src-tauri/prev-player-updater.key` (git-ignored, never
+committed):
 
 ```bash
+npm run release              # notes from RELEASE_NOTES.md
 npm run release -- "What changed, in one line"
 ```
 
-That builds the installer, signs it for the updater, checks the signature is
-the key installed apps trust (and refuses to go on with any other), writes
-`latest.json` marked `"silent": true`, and prints a link to a pre-filled GitHub
-release form. Publish the installer, its `.sig` and `latest.json` on a release
-tagged `v<version>`, marked **latest** (not a draft or pre-release — the updater
-only reads `releases/latest`).
+That does the same build, signing and checks, writes `latest.json` marked
+`"silent": true`, and prints a link to a pre-filled GitHub release form. Publish
+the installer, its `.sig` and `latest.json` on a release tagged `v<version>`,
+marked **latest** (not a draft or pre-release — the updater only reads
+`releases/latest`).
 
 It never asks for a password: the key's password is empty, and PowerShell can't
 hold an empty environment variable, so the build runs without the key and the
@@ -111,14 +136,16 @@ installer is signed right after. A key kept elsewhere can be given as
 `TAURI_SIGNING_PRIVATE_KEY` (its text or path), with
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if it has a password.
 
+### Silent or announced
+
 A silent release reaches every install on 1.5.2 or newer without anyone doing
 anything: it downloads in the background, installs when the user closes the
-app, and the next launch is the new version. Pass `--announce` to leave the
-flag off: a minor or major bump then shows a "ready, installs when you close
-the app" toast with a *Restart now* button (a patch bump stays quiet either
-way). Installs older than 1.5.2 apply
-it the way their own build does (1.3.2–1.5.1: installs and relaunches at
-launch; 1.3.1 and earlier: a dialog).
+app, and the next launch is the new version. Announce it (`--announce`, or tick
+*Announce* when running the workflow by hand) to leave the flag off: a minor or
+major bump then shows a "ready, installs when you close the app" toast with a
+*Restart now* button (a patch bump stays quiet either way). Installs older than
+1.5.2 apply it the way their own build does (1.3.2–1.5.1: installs and relaunches
+at launch; 1.3.1 and earlier: a dialog).
 
 The **private signing key is never committed** — `.gitignore` blocks every
 `*.key` and `*.key.pub`, so it can sit in `src-tauri/` on the release PC. Only
